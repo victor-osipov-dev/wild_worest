@@ -1,0 +1,19 @@
+{
+  "name": "3dgame-babylon",
+  "version": "1.0.0",
+  "description": "Port of Godot 3DGame (player, bow/arrows, security cameras, animals, pit/cave) to Babylon.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^7.0.0",
+    "@babylonjs/gui": "^7.0.0",
+    "@babylonjs/loaders": "^7.0.0"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}
