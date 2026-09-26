@@ -301,6 +301,22 @@ export const animals = [];
 const KIND_YAW = { rabbit: Math.PI, fox: Math.PI, wolf: Math.PI, bear: 0 };
 
 const MODEL_FILES = { rabbit: "rabbit.glb", fox: "fox.glb", wolf: "wolf.glb", bear: "bear.glb" };
+// Доводка pitch для скиinned-мешей Quaternius (лиса/волк): их inverseBindMatrices
+// несут лишние -90°..-70° про X (проверено покадрово в headless: ось тела смотрит
+// вверх на ~70°), и звери «сидят». Клон меша (parent примитивов — НЕ путать
+// с одноимённым stale-узлом, getNodeByName может вернуть его!) доворачиваем
+// жёстко: анатомия и анимации не страдают, т.к. это статическое размещение.
+// Углы подобраны по главной оси тела: wolf -60° (ось ~5-11°), fox -70° (~7°).
+const KIND_PITCH = { fox: -70, wolf: -60 };
+function fixMeshPitch(res, kind) {
+  const deg = KIND_PITCH[kind];
+  if (deg === undefined) return;
+  const prim = (res.meshes || []).find(m => m.name && m.name.includes("primitive"));
+  const node = prim && prim.parent;
+  if (!node) return;
+  const a = deg * Math.PI / 360;
+  node.rotationQuaternion = new BABYLON.Quaternion(Math.sin(a), 0, 0, Math.cos(a));
+}
 
 // Скелеты, у которых корень — НЕ общий корень всех костей (Blender-риги с IK:
 // лиса/волк Quaternius — кости IK*/FF висят на AnimalArmature мимо Body).
@@ -342,6 +358,7 @@ export async function spawnAnimal(scene, kind, pos) {
   try {
     const res = await BABYLON.SceneLoader.ImportMeshAsync("", MODELS_BASE(), MODEL_FILES[kind], scene);
     fixSkeletonRoots(scene, res);
+    fixMeshPitch(res, kind);
     if (res.meshes.length) {
       const glb = res.meshes[0];
       const bb = glb.getHierarchyBoundingVectors();
