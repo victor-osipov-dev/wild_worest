@@ -302,6 +302,29 @@ const KIND_YAW = { rabbit: Math.PI, fox: 0, wolf: 0, bear: 0 };
 
 const MODEL_FILES = { rabbit: "rabbit.glb", fox: "fox.glb", wolf: "wolf.glb", bear: "bear.glb" };
 
+// Скелеты, у которых корень — НЕ общий корень всех костей (Blender-риги с IK:
+// лиса/волк Quaternius — кости IK*/FF висят на AnimalArmature мимо Body).
+// Лоадер строит цепочку костей только внутри скелета, и трансформ предка
+// (у AnimalArmature скейл x100) теряется для всего поддерева: кости получают
+// ~1/100 масштаб, мех схлопывается в точку, а смешанные примитивы — в «палки».
+// Возвращаем корневые кости под их предков, как в узлах glTF.
+function fixSkeletonRoots(scene, res) {
+  for (const sk of res.skeletons || []) {
+    const byName = new Map();
+    for (const b of sk.bones) if (!byName.has(b.name)) byName.set(b.name, b);
+    for (const b of sk.bones) {
+      if (b.getParent() || b.getIndex() === -1) continue; // только корни-джойнты
+      let n = scene.getNodeByName(b.name);
+      n = n ? n.parent : null;
+      while (n) {
+        const pb = byName.get(n.name);
+        if (pb && pb !== b) { b.setParent(pb, false); break; }
+        n = n.parent;
+      }
+    }
+  }
+}
+
 export async function spawnAnimal(scene, kind, pos) {
   const info = KINDS[kind];
   const mesh = BABYLON.MeshBuilder.CreateBox(`an_${kind}`, { width: 0.8, height: Math.max(info.h, 0.3), depth: 1.2 }, scene);
@@ -318,6 +341,7 @@ export async function spawnAnimal(scene, kind, pos) {
   // Пытаемся заменить бокс на .glb (не критично если нет)
   try {
     const res = await BABYLON.SceneLoader.ImportMeshAsync("", MODELS_BASE(), MODEL_FILES[kind], scene);
+    fixSkeletonRoots(scene, res);
     if (res.meshes.length) {
       const glb = res.meshes[0];
       const bb = glb.getHierarchyBoundingVectors();
