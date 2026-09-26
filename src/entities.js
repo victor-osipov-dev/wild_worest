@@ -295,10 +295,10 @@ export const KINDS = {
 };
 export const animals = [];
 // Поправка ориентации модели. glTF правосторонний, Babylon левосторонний —
-// лоадер зеркалит модели по Z, поэтому развороты обратные оригиналу.
-// Лиса/волк — новый риг Ultimate Animal Pack (Quaternius, CC0): тот же набор
-// костей у обоих, yaw общий; медведь/кролик — старые модели.
-const KIND_YAW = { rabbit: Math.PI, fox: 0, wolf: 0, bear: 0 };
+// лоадер зеркалит модели по Z (__root__.scaling.z = -1), поэтому нос из +Z
+// файла смотрит в -Z хитбокса. rabbit/fox/wolf в файле носом в +Z → доворот PI;
+// bear в файле носом в -Z → доворот 0. Без этого лиса/волк идут задом наперёд.
+const KIND_YAW = { rabbit: Math.PI, fox: Math.PI, wolf: Math.PI, bear: 0 };
 
 const MODEL_FILES = { rabbit: "rabbit.glb", fox: "fox.glb", wolf: "wolf.glb", bear: "bear.glb" };
 
@@ -480,14 +480,16 @@ export function updateAnimals(scene, dt, player, hud) {
       an.st.moving = moving;
     } else {
       if (an.attackAG?.isPlaying) an.attackAG.stop();
-      if (moving !== an.st.moving) {
-        an.st.moving = moving;
-        if (moving && an.walkAG) {
-          an.restAG?.stop(); if (!an.walkAG.isPlaying) an.walkAG.start(true);
-        } else if (!moving && an.restAG) {
-          an.walkAG?.stop(); if (!an.restAG.isPlaying) an.restAG.start(true);
-        }
+      // После атаки вернуть looping-клип ПРИНУДИТЕЛЬНО: во время атаки st.moving
+      // уже выставлено в moving, поэтому сравнение ниже не срабатывало и моб
+      // оставался замороженным в кадре атаки (walk/rest были остановлены).
+      const want = moving ? an.walkAG : an.restAG;
+      const other = moving ? an.restAG : an.walkAG;
+      if (want) {
+        if (other?.isPlaying) other.stop();
+        if (!want.isPlaying) want.start(true);
       }
+      an.st.moving = moving;
       if (moving && an.walkAG?.isPlaying)
         an.walkAG.speedRatio = Math.min(6, Math.max(0.3, spd * 6));
     }
