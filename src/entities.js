@@ -17,7 +17,7 @@ export function createPlayer(scene, camera) {
   mesh.metadata = { kind: "player" };
   mesh.layerMask = 0x2; // невидим для фид-камеры (как cull_mask без layer2)
   const st = { vel: new BABYLON.Vector3(0, 0, 0), hp: 100, meat: 0, grounded: false,
-    spawn: mesh.position.clone(), yaw: 2.4, pitch: 0 };
+    spawn: mesh.position.clone(), yaw: 2.4, pitch: 0, flash: 0 };
   return { mesh, st };
 }
 
@@ -75,10 +75,13 @@ export function updatePlayer(scene, player, camera, input, dt, frozen) {
 
 export function damagePlayer(player, amount, hud) {
   player.st.hp = Math.max(0, player.st.hp - amount);
+  // Удар зверя: экран краснеет ВСЁ СИЛЬНЕЕ (накопление, затухание — в main.js).
+  player.st.flash = Math.min(1, player.st.flash + 0.3);
   if (player.st.hp <= 0) {
     player.mesh.position.copyFrom(player.st.spawn);
     player.st.vel.set(0, 0, 0);
     player.st.hp = 100;
+    player.st.flash = 0; // после смерти экран снова чистый
   }
   hud();
 }
@@ -301,13 +304,13 @@ export const animals = [];
 const KIND_YAW = { rabbit: Math.PI, fox: Math.PI, wolf: Math.PI, bear: 0 };
 
 const MODEL_FILES = { rabbit: "rabbit.glb", fox: "fox.glb", wolf: "wolf.glb", bear: "bear.glb" };
-// Доводка pitch для скиinned-мешей Quaternius (лиса/волк): их inverseBindMatrices
-// несут лишние -90°..-70° про X (проверено покадрово в headless: ось тела смотрит
-// вверх на ~70°), и звери «сидят». Клон меша (parent примитивов — НЕ путать
-// с одноимённым stale-узлом, getNodeByName может вернуть его!) доворачиваем
-// жёстко: анатомия и анимации не страдают, т.к. это статическое размещение.
-// Углы подобраны по главной оси тела: wolf -60° (ось ~5-11°), fox -70° (~7°).
-const KIND_PITCH = { fox: -70, wolf: -60 };
+// Доводка ориентации для мешей Quaternius со скелетом (лиса/волк): их узлы дают
+// лишний поворот (AnimalArmature: -90° по X, __root__: 180° по Y), из-за чего
+// модель в файле (нос в +Z, верх в +Y) рендерится кувырком. Доворачиваем клон
+// меша жёстко: анатомия и анимации не страдают, т.к. это статическое размещение.
+// +90° по X: верх файла → мировой верх, нос → -Z хитбокса (KIND_YAW = PI).
+// Проверено в игре (скриншоты): лиса/волк стоят на ногах и идут головой вперёд.
+const KIND_PITCH = { fox: 90, wolf: 90 };
 function fixMeshPitch(res, kind) {
   const deg = KIND_PITCH[kind];
   if (deg === undefined) return;
@@ -361,6 +364,17 @@ export async function spawnAnimal(scene, kind, pos) {
     fixMeshPitch(res, kind);
     if (res.meshes.length) {
       const glb = res.meshes[0];
+      // Честные границы ПОСЛЕ фиксов: getHierarchyBoundingVectors читает кэш,
+      // посчитанный лоадером до фиксов скелета (размер/посадка плывут в разы).
+      // Первый проход освежает мировые матрицы, refreshBoundingInfo(true)
+      // пересчитывает границы по текущему скинингу (копию, буфер цел —
+      // двойного скининга в шейдере не будет), второй проход читает их.
+      glb.getHierarchyBoundingVectors();
+      for (const m of res.meshes) {
+        if (m.getTotalVertices && m.getTotalVertices() && m.skeleton) {
+          try { m.refreshBoundingInfo(true); } catch { /* noop */ }
+        }
+      }
       const bb = glb.getHierarchyBoundingVectors();
       const sizeY = Math.max(0.01, bb.max.y - bb.min.y);
       const s = info.h / sizeY;
@@ -392,7 +406,7 @@ export function damageAnimal(scene, an, dmg) {
   if (an.hp <= 0) {
     an.st.dead = true; an.st.deathAge = 0;
     an.mesh.setEnabled(false);
-    spawnMeat(scene, an.mesh.position);
+    if (an.kind === "rabbit") spawnMeat(scene, an.mesh.position);
   } else if (an.kind !== "rabbit") an.st.forcedAggro = true;
 }
 

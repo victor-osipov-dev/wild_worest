@@ -2,11 +2,12 @@
 // Управление: WASD+мышь (pointer lock), Space, ЛКМ — лук, E — дверь/камеры/монитор, Esc — пауза/выход.
 import * as BABYLON from "@babylonjs/core";
 import "@babylonjs/loaders";
-import { initTerrain, updateTerrain, cullTerrainChunks } from "./terrain.js";
-import { buildHouse, updateDoor, buildPit, buildCave, breakGlass } from "./world.js";
+import { initTerrain, updateTerrain, cullTerrainChunks, pushOutOfTrees } from "./terrain.js";
+import { buildHouse, updateDoor, buildPit, buildCave, breakGlass,
+  buildCampfire, updateCampfire, campfireInteract, COOK_TIME } from "./world.js";
 import { createPlayer, updatePlayer, damagePlayer, createBow, updateBow, shootArrow,
   updateArrows, arrows, spawnMeat, updateMeats, spawnAnimal, updateAnimals, animals,
-  pickKind, createCamManager, registerCamera, removeCamera } from "./entities.js";
+  pickKind, createCamManager, registerCamera, removeCamera, meats, damageAnimal } from "./entities.js";
 import { getHeight } from "./noise.js";
 
 const canvas = document.getElementById("renderCanvas");
@@ -30,6 +31,7 @@ const terrain = initTerrain(scene);
 const { door, glass, screen, screenMat } = buildHouse(scene);
 const pit = buildPit(scene);
 const cave = buildCave(scene);
+const campfire = buildCampfire(scene);
 const player = createPlayer(scene, camera);
 const bow = createBow(scene, camera);
 const mgr = createCamManager(scene);
@@ -66,6 +68,11 @@ function hud() {
   $("camCount").textContent = `Камеры: ${mgr.list.length} / 5`;
 }
 hud();
+function toast(msg) {
+  $("toast").textContent = msg;
+  $("toast").style.display = "block";
+  mgr.toastT = 2;
+}
 
 // ---------- ввод ----------
 addEventListener("keydown", (e) => {
@@ -142,6 +149,11 @@ canvas.addEventListener("pointerdown", (e) => {
   // Захват — здесь (клик по канвасу) или по подсказке ниже; один запрос на клик
   if (document.pointerLockElement !== canvas) { lockPointer(); return; }
   if (mgr.monitorActive) return;
+  // костёр (ЛКМ 4.5м): жарка/еда — в приоритете над луком
+  if (scene.pickWithRay(camera.getForwardRay(4.5), (m) => m.metadata?.kind === "campfire")?.pickedMesh) {
+    campfireInteract(campfire, player, hud, toast);
+    return;
+  }
   // подбор стрелы взглядом (луч 8м, mask 4)
   const ray = camera.getForwardRay(8);
   const hit = scene.pickWithRay(ray, (m) => m.name === "arrow");
@@ -224,9 +236,11 @@ function placeCamera(hit) {
   const root = new BABYLON.TransformNode(`SecurityCam_${id}`, scene);
   const n = hit.getNormal(true);
   root.position = hit.pickedPoint.add(n.scale(0.03));
-  // базис: z от камеры, y вверх
-  const fwd = camera.getDirection(new BABYLON.Vector3(0, 0, 1));
-  const z = new BABYLON.Vector3(fwd.x, 0, fwd.z).normalize().scale(-1);
+  // Камера смотрит ОТ ствола: линза и взгляд монитора идут по локальной -Z
+  // модели, поэтому базис z = -горизонтальной нормали ствола (а не вслед за
+  // взглядом игрока — тот смотрел в ствол). Нормаль у боковой грани цилиндра
+  // почти горизонтальна (постановка требует |ny| < 0.6).
+  const z = new BABYLON.Vector3(-n.x, 0, -n.z).normalize();
   root.rotation.y = Math.atan2(z.x, z.z);
   const bodyMat = new BABYLON.StandardMaterial("camBody", scene);
   bodyMat.diffuseColor = new BABYLON.Color3(0.15, 0.15, 0.17);
@@ -314,7 +328,10 @@ for (let i = 0; i < 4; i++) {
 let last = performance.now();
 engine.runRenderLoop(() => {
   const now = performance.now();
-  const dt = Math.min(0.05, (now - last) / 1000);
+  // raw — реальное время кадра, dt — кламп для физики. Таймеры (жарка мяса)
+  // идут по raw: на низком fps физика может тормозить, а секунды — нет.
+  const raw = (now - last) / 1000;
+  const dt = Math.min(0.05, raw);
   last = now;
   if (!started || paused) { scene.render(); return; }
 
@@ -332,18 +349,29 @@ engine.runRenderLoop(() => {
     }
   }
   updatePlayer(scene, player, camera, input, dt, mgr.monitorActive);
+  pushOutOfTrees(terrain, player.mesh.position);
   updateDoor(door, player.mesh.position, dt);
   // _update_looking каждый кадр (луч 5м до монитора) + хинты как в _update_hud
   const lookingAtMonitor = !mgr.monitorActive &&
     !!rayFromCam(5, (m) => m.metadata?.kind === "monitor").pickedMesh;
+  const lookingAtCampfire = !!rayFromCam(4.5, (m) => m.metadata?.kind === "campfire").pickedMesh;
   if (mgr.monitorActive) $("hint").textContent = "";
   else if (lookingAtMonitor && mgr.list.length) $("hint").textContent = "E — посмотреть камеры";
+  else if (lookingAtCampfire) {
+    $("hint").textContent = campfire.phase === "cooking"
+      ? `Мясо жарится… ${Math.max(0, Math.ceil(COOK_TIME - campfire.t))}с`
+      : campfire.phase === "ready"
+        ? "ЛКМ — съесть жареное мясо"
+        : player.st.meat > 0 ? "ЛКМ — пожарить мясо" : "Костёр: нет сырого мяса";
+  }
   else if (door.near) $("hint").textContent = "E — открыть/закрыть дверь";
   else $("hint").textContent = "";
   updateBow(bow, dt);
   updateArrows(scene, dt, animals, glass, player);
   updateMeats(scene, dt, player, hud);
   updateAnimals(scene, dt, player, hud);
+  updateCampfire(campfire, raw);
+  if (campfire.readyFlash) { campfire.readyFlash = false; toast("Жареное мясо готово — тыкни по костру"); }
 
   // спавн wildlife для монитора: только в режиме монитора, 4-9с, шанс 45%, 3-7м в конусе
   if (mgr.monitorActive && mgr.list[mgr.active]) {
@@ -456,6 +484,17 @@ engine.runRenderLoop(() => {
     }
   }
 
+  // Удары зверей: накопленная красная вспышка постепенно гаснет.
+  // Гасим по реальному времени (raw), иначе на низком fps красный экран висит.
+  if (player.st.flash > 0) player.st.flash = Math.max(0, player.st.flash - 0.16 * raw);
+  $("dmgFlash").style.opacity = player.st.flash.toFixed(3);
+
   scene.render();
 });
 addEventListener("resize", () => engine.resize());
+
+// Доступ для автотестов Playwright — только с ?test=1, в обычной игре не создаётся.
+if (new URLSearchParams(location.search).has("test")) {
+  window.__game = { scene, camera, player, hud, campfire, campfireInteract,
+    damagePlayer, damageAnimal, getHeight, terrain, animals, meats, BABYLON };
+}

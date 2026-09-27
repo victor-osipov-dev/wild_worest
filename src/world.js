@@ -12,6 +12,7 @@ export function buildHouse(scene) {
   woodTex.uScale = 3; woodTex.vScale = 3;
   const woodMat = new BABYLON.StandardMaterial("woodMat", scene);
   woodMat.diffuseTexture = woodTex;
+  woodMat.specularColor = new BABYLON.Color3(0, 0, 0); // дерево матовое — без бликов
   const floor = BABYLON.MeshBuilder.CreateBox("floor", { width: 5.2, height: 0.2, depth: 4.8 }, scene);
   floor.position.y = -0.1; floor.material = woodMat; floor.parent = root;
   floor.checkCollisions = true; floor.isPickable = true; floor.metadata = { kind: "house" };
@@ -70,8 +71,10 @@ export function buildHouse(scene) {
     ];
     const uv = [];
     for (let i = 0; i < pos.length; i += 3) uv.push(pos[i + 2] / 5, pos[i + 1] / 4);
-    const idx = pos.map((_, i) => i).filter((_, i) => i % 3 === 0).flatMap((v) => [v, v + 1, v + 2]);
     const normals = [];
+    // индексы — по номерам ВЕРШИН (pos.length/3), не по байтам позиций
+    const idx = [];
+    for (let v = 0; v < pos.length / 3; v += 3) idx.push(v, v + 1, v + 2);
     BABYLON.VertexData.ComputeNormals(pos, idx, normals);
     const vd = new BABYLON.VertexData();
     vd.positions = pos; vd.indices = idx; vd.uvs = uv; vd.normals = normals;
@@ -89,6 +92,7 @@ export function buildHouse(scene) {
   doorMesh.position.x = -0.45; doorMesh.parent = pivot;
   const doorMat = new BABYLON.StandardMaterial("doorMat", scene);
   doorMat.diffuseColor = new BABYLON.Color3(0.4, 0.25, 0.12);
+  doorMat.specularColor = new BABYLON.Color3(0, 0, 0);
   doorMesh.material = doorMat; doorMesh.checkCollisions = true;
   const knob = BABYLON.MeshBuilder.CreateSphere("knob", { diameter: 0.09 }, scene);
   knob.position.set(-0.75, 0, 0.08); knob.parent = doorMesh;
@@ -124,6 +128,7 @@ export function buildHouse(scene) {
   bed.material = wallMat; bed.checkCollisions = true;
   const lamp = new BABYLON.PointLight("InteriorLight", new BABYLON.Vector3(HOUSE.x, 2.0, HOUSE.z), scene);
   lamp.diffuse = new BABYLON.Color3(1, 0.85, 0.6); lamp.intensity = 2.5; lamp.range = 7;
+  lamp.specular = new BABYLON.Color3(0, 0, 0); // чисто диффузный свет в доме — бликов нет
 
   // Свет/небо
   const sun = new BABYLON.DirectionalLight("sun", new BABYLON.Vector3(-0.5, -1, 0.3), scene);
@@ -169,6 +174,209 @@ export function breakGlass(scene, glass) {
       if (age > life) { scene.onBeforeRenderObservable.remove(obs); s.dispose(); }
     });
   }
+}
+
+// --- Костёр рядом с домом: постоянно горит с дымом, ЛКМ — жарка мяса и еда ---
+export const COOK_TIME = 8; // секунд жарки одного куска
+const RAW_COLOR = new BABYLON.Color3(0.6, 0.22, 0.18);
+const FRIED_COLOR = new BABYLON.Color3(0.5, 0.3, 0.14);
+
+// Мягкий круглый спрайт для частиц (огонь/дым) — без внешних ассетов.
+function blobTexture(scene, name) {
+  const dt = new BABYLON.DynamicTexture(name, 64, scene, true);
+  const ctx = dt.getContext();
+  ctx.clearRect(0, 0, 64, 64);
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.45, "rgba(255,255,255,0.6)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  dt.update();
+  dt.hasAlpha = true;
+  dt.wrapU = dt.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
+  return dt;
+}
+
+export function buildCampfire(scene) {
+  const x = HOUSE.x + 2.6, z = HOUSE.z - 4.4; // перед домом, справа от двери
+  const y = getHeight(x, z);
+  const root = new BABYLON.TransformNode("Campfire", scene);
+  root.position.set(x, y, z);
+  const cf = { root, pos: new BABYLON.Vector3(x, y, z), phase: "idle", t: 0, time: 0,
+    readyFlash: false, meat: null, flame: null, light: null };
+  const pickable = (m) => { m.isPickable = true; m.metadata = { kind: "campfire" }; };
+
+  // Каменное кольцо
+  const stoneMat = new BABYLON.StandardMaterial("cfStoneMat", scene);
+  stoneMat.diffuseColor = new BABYLON.Color3(0.4, 0.38, 0.36);
+  stoneMat.specularColor = new BABYLON.Color3(0.02, 0.02, 0.02);
+  let seed = 91;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) | 0, ((seed >>> 0) % 1000) / 1000);
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * Math.PI * 2 + rnd() * 0.35;
+    const s = 0.14 + rnd() * 0.08;
+    const st = BABYLON.MeshBuilder.CreateSphere(`cfStone${i}`, { diameter: 1, segments: 6 }, scene);
+    st.scaling.set(s * 1.4, s, s * 1.4);
+    st.position.set(Math.cos(a) * 0.52, s * 0.35, Math.sin(a) * 0.52);
+    st.rotation.y = rnd() * 3;
+    st.material = stoneMat; st.parent = root;
+    pickable(st);
+  }
+  // Брёвна крест-накрест
+  const logMat = new BABYLON.StandardMaterial("cfLogMat", scene);
+  logMat.diffuseColor = new BABYLON.Color3(0.3, 0.18, 0.09);
+  logMat.specularColor = new BABYLON.Color3(0.02, 0.02, 0.02);
+  for (let i = 0; i < 3; i++) {
+    const log = BABYLON.MeshBuilder.CreateCylinder(`cfLog${i}`,
+      { height: 0.8, diameter: 0.12, tessellation: 7 }, scene);
+    log.rotation.z = Math.PI / 2;
+    log.rotation.y = i * Math.PI / 3 + 0.35;
+    log.position.y = 0.1 + (i % 2) * 0.05;
+    log.material = logMat; log.parent = root;
+    pickable(log);
+  }
+  // Рогатки + шампур: мясо висит прямо над огнём (шампур вдоль Z — виден с тропы)
+  for (const sz of [-0.38, 0.38]) {
+    const stick = BABYLON.MeshBuilder.CreateCylinder("cfStick",
+      { height: 0.64, diameter: 0.05, tessellation: 6 }, scene);
+    stick.position.set(0, 0.32, sz);
+    stick.rotation.x = sz > 0 ? -0.12 : 0.12;
+    stick.material = logMat; stick.parent = root;
+    pickable(stick);
+  }
+  const skewer = BABYLON.MeshBuilder.CreateCylinder("cfSkewer",
+    { height: 0.9, diameter: 0.035, tessellation: 6 }, scene);
+  skewer.rotation.x = Math.PI / 2;
+  skewer.position.y = 0.62;
+  skewer.material = logMat; skewer.parent = root;
+  pickable(skewer);
+
+  // Кусок мяса на шампуре: виден во время жарки, коричневеет когда готово
+  const meat = BABYLON.MeshBuilder.CreateBox("cfMeat", { width: 0.2, height: 0.14, depth: 0.2 }, scene);
+  const meatMat = new BABYLON.StandardMaterial("cfMeatMat", scene);
+  meatMat.diffuseColor = RAW_COLOR.clone();
+  meatMat.specularColor = new BABYLON.Color3(0.1, 0.05, 0.05);
+  meat.material = meatMat; meat.parent = root;
+  meat.position.y = 0.6;
+  meat.isPickable = false;
+  meat.setEnabled(false);
+  cf.meat = meat;
+
+  // Пламя: конус-биллборд со свечением, живёт отдельно от частиц
+  const flame = BABYLON.MeshBuilder.CreateCylinder("cfFlame",
+    { diameterTop: 0, diameterBottom: 0.3, height: 0.52, tessellation: 10 }, scene);
+  const flameMat = new BABYLON.StandardMaterial("cfFlameMat", scene);
+  flameMat.diffuseColor = new BABYLON.Color3(0, 0, 0);
+  flameMat.emissiveColor = new BABYLON.Color3(1, 0.4, 0.05);
+  flameMat.alpha = 0.8;
+  flameMat.backFaceCulling = false;
+  flame.material = flameMat;
+  flame.billboardMode = BABYLON.Mesh.BILLBOARDMODE_Y;
+  flame.position.y = 0.34;
+  flame.isPickable = false;
+  cf.flame = flame;
+
+  // Прозрачный хитбокс, чтобы тыкать костёр было легко (кирпичи/брёвна тоже pickable)
+  const hit = BABYLON.MeshBuilder.CreateBox("cfHit", { width: 1.35, height: 1.25, depth: 1.35 }, scene);
+  const hitMat = new BABYLON.StandardMaterial("cfHitMat", scene);
+  hitMat.alpha = 0; // не виден, но участвует в raycast (isVisible=false ломает pick)
+  hitMat.disableDepthWrite = true;
+  hit.material = hitMat;
+  hit.position.y = 0.58;
+  hit.parent = root;
+  pickable(hit);
+
+  // Огонь
+  const blob = blobTexture(scene, "cfParticleTex");
+  const fire = new BABYLON.ParticleSystem("cfFire", 160, scene);
+  fire.particleTexture = blob;
+  fire.emitter = new BABYLON.Vector3(x, y + 0.16, z);
+  fire.minEmitBox = new BABYLON.Vector3(-0.2, 0, -0.2);
+  fire.maxEmitBox = new BABYLON.Vector3(0.2, 0.06, 0.2);
+  fire.color1 = new BABYLON.Color4(0.95, 0.45, 0.06, 0.8);
+  fire.color2 = new BABYLON.Color4(0.9, 0.6, 0.15, 0.6);
+  fire.colorDead = new BABYLON.Color4(1, 0.25, 0.03, 0);
+  fire.minLifeTime = 0.3; fire.maxLifeTime = 0.65;
+  fire.addSizeGradient(0, 0.1, 0.16);
+  fire.addSizeGradient(1, 0.02, 0.05);
+  fire.emitRate = 16;
+  fire.direction1 = new BABYLON.Vector3(-0.1, 1, -0.1);
+  fire.direction2 = new BABYLON.Vector3(0.1, 1.7, 0.1);
+  fire.minEmitPower = 0.35; fire.maxEmitPower = 0.8;
+  fire.gravity = new BABYLON.Vector3(0, 0.8, 0);
+  // ВАЖНО: у ParticleSystem по умолчанию BLENDMODE_ONEONE (аддитив) — белое пересветление.
+  // Огонь и дым рисуем обычным альфа-блендингом, свет даёт PointLight + свечение конуса.
+  fire.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
+  fire.start();
+
+  // Дым: серый, медленно поднимается и раздувается
+  const smoke = new BABYLON.ParticleSystem("cfSmoke", 120, scene);
+  smoke.particleTexture = blob;
+  smoke.emitter = new BABYLON.Vector3(x, y + 0.72, z);
+  smoke.minEmitBox = new BABYLON.Vector3(-0.1, 0, -0.1);
+  smoke.maxEmitBox = new BABYLON.Vector3(0.1, 0.05, 0.1);
+  smoke.color1 = new BABYLON.Color4(0.55, 0.54, 0.52, 0.7);
+  smoke.color2 = new BABYLON.Color4(0.38, 0.38, 0.37, 0.5);
+  smoke.colorDead = new BABYLON.Color4(0.3, 0.3, 0.3, 0);
+  smoke.minLifeTime = 2; smoke.maxLifeTime = 3;
+  smoke.addSizeGradient(0, 0.1, 0.18);
+  smoke.addSizeGradient(1, 0.4, 0.62);
+  smoke.emitRate = 5;
+  smoke.direction1 = new BABYLON.Vector3(-0.12, 1, -0.12);
+  smoke.direction2 = new BABYLON.Vector3(0.3, 1.4, 0.3);
+  smoke.minEmitPower = 0.35; smoke.maxEmitPower = 0.7;
+  smoke.gravity = new BABYLON.Vector3(0, 0.25, 0);
+  smoke.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD; // не ONEONE (см. выше)
+  smoke.start();
+
+  // Свет костра
+  const light = new BABYLON.PointLight("cfLight", new BABYLON.Vector3(x, y + 0.7, z), scene);
+  light.diffuse = new BABYLON.Color3(1, 0.6, 0.25);
+  light.intensity = 1.15;
+  light.range = 6;
+  cf.light = light;
+  return cf;
+}
+
+export function updateCampfire(cf, dt) {
+  cf.time += dt;
+  const fl = 0.86 + 0.1 * Math.sin(cf.time * 11.3) + 0.06 * Math.sin(cf.time * 23.7 + 1.3);
+  cf.light.intensity = 1.15 * fl;
+  const fs = 0.9 + 0.1 * Math.sin(cf.time * 13.1) + 0.05 * Math.sin(cf.time * 7.7);
+  cf.flame.scaling.set(fs, 0.92 + 0.14 * Math.sin(cf.time * 9.4 + 2), fs);
+  if (cf.phase === "cooking") {
+    cf.t += dt;
+    if (cf.t >= COOK_TIME) {
+      cf.t = COOK_TIME;
+      cf.phase = "ready";
+      cf.readyFlash = true;
+      cf.meat.material.diffuseColor = FRIED_COLOR;
+    }
+  }
+}
+
+// ЛКМ по костру: сырое мясо -> жарка -> готово -> съесть (здоровье полностью)
+export function campfireInteract(cf, player, hud, toast) {
+  if (cf.phase === "cooking") {
+    toast(`Мясо жарится… ${Math.max(0, Math.ceil(COOK_TIME - cf.t))}с`);
+    return;
+  }
+  if (cf.phase === "ready") {
+    if (player.st.hp >= 100) { toast("Здоровье и так полное"); return; }
+    cf.phase = "idle"; cf.t = 0; cf.meat.setEnabled(false);
+    player.st.hp = 100;
+    hud();
+    toast("Жареное мясо съедено — здоровье восстановлено");
+    return;
+  }
+  if (player.st.meat <= 0) { toast("Нет сырого мяса — охоться на кролика"); return; }
+  player.st.meat--;
+  hud();
+  cf.phase = "cooking"; cf.t = 0;
+  cf.meat.setEnabled(true);
+  cf.meat.material.diffuseColor = RAW_COLOR.clone();
+  toast("Мясо заряжено на жарку");
 }
 
 // --- Яма: торы-кольца, шипы, свечение, частицы (порт pit_visual.gd) ---

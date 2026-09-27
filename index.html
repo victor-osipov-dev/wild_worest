@@ -24,6 +24,8 @@
     #debug { position: fixed; right: 8px; top: 8px; z-index: 99; display: none; color: #8fff8f; background: rgba(0,0,0,.6); font-size: 13px; padding: 6px 10px; border-radius: 6px; white-space: pre-wrap; }
     #monitorHelp { left: 50%; bottom: 130px; transform: translateX(-50%); font-size: 16px; display: none; text-align: center; }
     #fade { position: fixed; left: 0; top: 0; width: 100%; height: 100%; background: #000; opacity: 0; pointer-events: none; z-index: 20; transition: opacity .1s linear; }
+    #dmgFlash { position: fixed; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; z-index: 15; opacity: 0;
+      background: radial-gradient(ellipse at center, rgba(190,0,0,.18) 0%, rgba(200,0,0,.55) 62%, rgba(150,0,0,.92) 100%); }
     #pause { position: fixed; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,.6); display: none; z-index: 30; align-items: center; justify-content: center; flex-direction: column; gap: 12px; }
     #pause button { pointer-events: auto; font-size: 20px; padding: 10px 28px; cursor: pointer; }
     #start { position: fixed; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,.75); z-index: 40; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 14px; color: #fff; }
@@ -44,6 +46,7 @@
     <div id="monitorHelp" class="panel">Стрелки / WASD — вращение камеры<br>C — следующая | X — предыдущая | M — метка<br>Esc — выйти</div>
   </div>
   <div id="fade"></div>
+  <div id="dmgFlash"></div>
   <div id="errbox"></div>
   <div id="debug"></div>
   <div id="pause">

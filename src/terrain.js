@@ -9,6 +9,49 @@ import { asset } from "./assets.js";
 
 export const TILE = 2.0, CHUNK_TILES = 16, CHUNK_WORLD = 32, VIEW_RADIUS = 2;
 
+// Импостеры дальнего леса.
+// SpriteManager билбордил карточку ЦЕЛИКОМ — в плоскость камеры и вокруг её
+// центра, — поэтому при наклоне камеры деревья заваливались и не стояли ровно
+// на земле. Вместо спрайтов: одна слитая карточка на чанк + шейдер, который
+// доворачивает КАЖДУЮ карточку только по yaw вокруг ЕЁ основания (чистый
+// Y-billboard): карточка всегда вертикальна и всегда стоит там, где посадили.
+BABYLON.Effect.ShadersStore["impostorVertexShader"] = `
+attribute vec3 position;
+attribute vec2 uv;
+attribute vec3 anchor;
+uniform mat4 view;
+uniform mat4 viewProjection;
+varying vec2 vUV;
+#include<fogVertexDeclaration>
+void main() {
+  // Первая строка view-матрицы = ось X камеры в мировых координатах (право
+  // экрана). Обнуляем Y — карточка не должна наклоняться вместе с камерой.
+  vec3 right = vec3(view[0][0], view[1][0], view[2][0]);
+  right.y = 0.0;
+  vec3 d = position - anchor; // плоская заготовка карточки: (u, v, 0)
+  vec3 worldPos = anchor + right * d.x + vec3(0.0, 1.0, 0.0) * d.y;
+  gl_Position = viewProjection * vec4(worldPos, 1.0);
+  vUV = uv;
+#ifdef FOG
+  vFogDistance = (view * vec4(worldPos, 1.0)).xyz;
+#endif
+}
+`;
+BABYLON.Effect.ShadersStore["impostorFragmentShader"] = `
+uniform sampler2D map;
+varying vec2 vUV;
+#include<fogFragmentDeclaration>
+void main() {
+  vec4 color = texture2D(map, vUV);
+  if (color.a < 0.5) discard;
+#ifdef FOG
+  color.rgb = mix(vFogColor, color.rgb, CalcFogFactor());
+#endif
+  gl_FragColor = color;
+#include<imageProcessingCompatibility>
+}
+`;
+
 // Запекание НАСТОЯЩИХ 3D-деревьев/кустов в спрайты-импостеры:
 // те же шаблоны геометрии и материалов, тот же свет сцены — совпадение идеальное.
 // Рендерим offscreen в RenderTargetTexture с прозрачным фоном, читаем пиксели,
@@ -16,9 +59,41 @@ export const TILE = 2.0, CHUNK_TILES = 16, CHUNK_WORLD = 32, VIEW_RADIUS = 2;
 function blitFlipped(ctx, px, w, h, dx, dy) {
   const img = ctx.createImageData(w, h);
   const row = w * 4;
-  for (let y = 0; y < h; y++)
-    img.data.set(px.subarray((h - 1 - y) * row, (h - y) * row), y * row);
+    for (let y = 0; y < h; y++)
+      img.data.set(px.subarray((h - 1 - y) * row, (h - y) * row), y * row);
   ctx.putImageData(img, dx, dy);
+}
+// Alpha-bleed: растекание цвета в прозрачные тексели вокруг силуэта.
+// Без него билинейная фильтрация на дальней дистанции смешивает зелёный с ЧЁРНЫМ
+// (rgb=0 под a=0) и альфа-тест превращает край в чёрные точки. Альфа не трогаем —
+// после размывания такие тексели всё равно отбрасываются тестом.
+function bleedAlpha(ctx, w, h, passes = 3) {
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  for (let p = 0; p < passes; p++) {
+    const prev = new Uint8ClampedArray(d);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        if (prev[i + 3] >= 16) continue;
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= w) continue;
+            const j = (yy * w + xx) * 4;
+            if (prev[j + 3] < 240) continue;
+            r += prev[j]; g += prev[j + 1]; b += prev[j + 2]; n++;
+          }
+        }
+        if (!n) continue;
+        d[i] = r / n; d[i + 1] = g / n; d[i + 2] = b / n;
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
 }
 // Самопроверка запекания: непрозрачные пиксели в зоне КРОНЫ.
 // ВАЖНО: readPixels() отдаёт строки СНИЗУ вверх (OpenGL), поэтому крона —
@@ -120,6 +195,8 @@ function bakeImpostorAtlas(st) {
     }
     bushRT.renderList = null;
     bushRT.dispose(); bushCam.dispose();
+    bleedAlpha(tctx, 512, 256);
+    bleedAlpha(bctx, 256, 128);
     return { treeURL: treeCanvas.toDataURL("image/png"), bushURL: bushCanvas.toDataURL("image/png") };
   } catch (err) {
     for (const p of bakedParts) { try { p.dispose(); } catch { /* noop */ } }
@@ -148,12 +225,17 @@ function treeSpriteURL() {
     for (const [x, y, r] of blobs) {
       g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
     }
-    for (let i = 0; i < 70; i++) { // редкий тёмный микрошум в тон
+    // Микрошум ТОЛЬКО по силуэту: source-atop гасит точечки, выпавшие в пустоту —
+    // иначе они рисуются отдельными тёмными точками вокруг дерева («чёрные точки»).
+    g.globalCompositeOperation = "source-atop";
+    for (let i = 0; i < 70; i++) {
       g.fillStyle = rnd() < 0.5 ? "#16240f" : "#101d0b";
       g.beginPath(); g.arc(rnd() * 128, rnd() * 170, 1 + rnd() * 2, 0, 7); g.fill();
     }
+    g.globalCompositeOperation = "source-over";
     g.restore();
   }
+  bleedAlpha(g, 512, 256);
   return c.toDataURL("image/png");
 }
 function bushSpriteURL() {
@@ -168,13 +250,40 @@ function bushSpriteURL() {
     for (const [x, y, r] of [[64, 70, 44], [36, 85, 28], [92, 85, 28], [64, 50, 30]]) {
       g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
     }
+    g.globalCompositeOperation = "source-atop"; // микрошум — только внутри силуэта
     for (let i = 0; i < 60; i++) {
       g.fillStyle = rnd() < 0.5 ? "#16240f" : "#101d0b";
       g.beginPath(); g.arc(rnd() * 128, 30 + rnd() * 90, 1 + rnd() * 2, 0, 7); g.fill();
     }
+    g.globalCompositeOperation = "source-over";
     g.restore();
   }
+  bleedAlpha(g, 256, 128);
   return c.toDataURL("image/png");
+}
+
+// Материал импостеров: как у SpriteManager — без мипов и без инверсии
+// (v=0 — верхняя строка картинки), туман сцены берём тот же, что у спрайтов.
+// Альфа-тест вместо блендинга: карточка пишет глубину и не требует сортировки.
+function makeImpostorMaterial(scene, name, url) {
+  const fogOn = scene.fogEnabled && scene.fogMode !== BABYLON.Scene.FOGMODE_NONE;
+  const m = new BABYLON.ShaderMaterial(name, scene,
+    { vertex: "impostor", fragment: "impostor" }, {
+      attributes: ["position", "uv", "anchor"],
+      uniforms: ["view", "viewProjection", "vFogInfos", "vFogColor"],
+      samplers: ["map"],
+      defines: fogOn ? ["FOG"] : [],
+    });
+  m.setTexture("map",
+    new BABYLON.Texture(url, scene, true, false, BABYLON.Texture.TRILINEAR_SAMPLINGMODE));
+  if (fogOn) {
+    m.setVector4("vFogInfos",
+      new BABYLON.Vector4(scene.fogMode, scene.fogStart, scene.fogEnd, scene.fogDensity));
+    m.setColor3("vFogColor", scene.fogColor);
+  }
+  m.backFaceCulling = false; // карточку видно с любой стороны
+  m.transparencyMode = BABYLON.Material.MATERIAL_ALPHATEST;
+  return m;
 }
 
 // Процедурная текстура листвы (общая на всех): тёмная база + светлые вкрапления.
@@ -249,22 +358,22 @@ export function initTerrain(scene) {
     return t;
   });
 
-  // Менеджеры спрайтов-импостеров: ВЕСЬ дальний лес = 2 draw call.
+  // Материалы импостеров дальнего леса: ВЕСЬ дальний лес = 1 draw call на чанк
+  // (одна слитая карточка для деревьев + одна для кустов).
   // Текстура — запечённые настоящие 3D (3 варианта деревьев, 2 кустов);
   // если запекание не удалось — рисованный фолбэк.
-  // Ёмкость с запасом: дальних чанков 16, деревьев ~25/чанк, кустов ~120/чанк.
-  // Число используемых ячеек атласа: и запечённый, и фолбэк-атлас рисуются с этим layout.
+  // Раскладка атласа: 4 колонки по 128px на 512 у деревьев (3 из 4 заняты),
+  // 2 колонки на 256 у кустов; строка одна — v идёт от верха картинки к низу.
   const st = {
     scene, mat, trunkTpl, leafTpls, chunks: new Map(), bakeError: null,
-    treeCells: 3, bushCells: 2,
+    treeCells: 3, bushCells: 2, treeCols: 4, bushCols: 2,
   };
   const baked = bakeImpostorAtlas(st);
   if (baked) { st.treeAtlasURL = baked.treeURL; st.bushAtlasURL = baked.bushURL; }
-  const treeSM = new BABYLON.SpriteManager("treeSM",
-    baked ? baked.treeURL : treeSpriteURL(), 600, { width: 128, height: 256 }, scene);
-  const bushSM = new BABYLON.SpriteManager("bushSM",
-    baked ? baked.bushURL : bushSpriteURL(), 2500, { width: 128, height: 128 }, scene);
-  st.treeSM = treeSM; st.bushSM = bushSM;
+  st.treeMat = makeImpostorMaterial(scene, "impostorTreeMat",
+    baked ? baked.treeURL : treeSpriteURL());
+  st.bushMat = makeImpostorMaterial(scene, "impostorBushMat",
+    baked ? baked.bushURL : bushSpriteURL());
   // Стартовые чанки вокруг спавна (0,-14) — сразу все, без поп-ина под меню
   updateTerrain(st, 0, -14);
   return st;
@@ -289,10 +398,11 @@ export function updateTerrain(st, px, pz) {
   }
   for (const [k, ch] of st.chunks) {
     if (!want.has(k)) { disposeChunk(ch); st.chunks.delete(k); continue; }
-    // Чанк был построен дальним (без кустов, редкие деревья), а игрок подошёл —
-    // перестроить в полном качестве (и наоборот)
+    // Чанк был построен дальним (спрайты), а игрок вошёл в него — перестроить
+    // в полном качестве (и наоборот). 3D-лес остался только в чанке игрока:
+    // кольцо и даль — 2D-спрайты (жёсткая оптимизация: ~9x меньше инстансов).
     const [chx, chz] = k.split(",").map(Number);
-    const wantFar = Math.max(Math.abs(chx - ccx), Math.abs(chz - ccz)) > 1;
+    const wantFar = Math.max(Math.abs(chx - ccx), Math.abs(chz - ccz)) > 0;
     if (ch.far !== wantFar) missing.push([chx, chz, 0]);
   }
   if (!missing.length) return;
@@ -301,7 +411,7 @@ export function updateTerrain(st, px, pz) {
     const k = chunkKey(cx, cz);
     if (st.chunks.has(k)) { disposeChunk(st.chunks.get(k)); st.chunks.delete(k); }
     st.chunks.set(k, buildChunk(st, cx, cz,
-      Math.max(Math.abs(cx - ccx), Math.abs(cz - ccz)) > 1));
+      Math.max(Math.abs(cx - ccx), Math.abs(cz - ccz)) > 0));
   }
 }
 
@@ -341,9 +451,13 @@ function buildChunk(st, cx, cz, far = false) {
   ground.metadata = { kind: "terrain" };
   ground.freezeWorldMatrix();
 
-  const ch = { cx, cz, far, ground, nodes: [], sprites: [], visible: true };
+  const ch = {
+    cx, cz, far, ground, nodes: [], sprites: [], visible: true,
+    cards: { tree: [], bush: [] }, treePts: [],
+  };
   populateTrees(st, ch, cxw, czw, far);
   populateBushes(st, ch, cxw, czw, far);
+  buildImpostorChunk(st, ch);
   return ch;
 }
 
@@ -372,10 +486,32 @@ export function cullTerrainChunks(st, camPos, camFwd, pcx, pcz) {
 function setChunkVisible(ch, v) {
   ch.ground.setEnabled(v);
   for (const n of ch.nodes) n.setEnabled(v);
-  for (const sp of ch.sprites) { // спрайты прячем нулевым размером
-    if (v) { sp.width = sp._w; sp.height = sp._h; }
-    else { sp.width = 0.0001; sp.height = 0.0001; }
+  for (const sp of ch.sprites) sp.setEnabled(v); // слитые карточки-импостеры
+}
+
+// Мягкая коллизия со стволами по чанкам игрока (3x3): спрайты-деревья в
+// кольце не имеют физических мешей, поэтому выталкиваем позицию сами.
+// Радиус = полуствол + радиус эллипсоида игрока; выталкиваем только XZ.
+export function pushOutOfTrees(st, pos) {
+  if (pos.y < -10) return pos; // пещера/яма: стволы живут на поверхности
+  const pcx = Math.floor(pos.x / CHUNK_WORLD), pcz = Math.floor(pos.z / CHUNK_WORLD);
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      const ch = st.chunks.get(chunkKey(pcx + dx, pcz + dz));
+      if (!ch || !ch.treePts.length) continue;
+      for (let i = 0; i < ch.treePts.length; i++) {
+        const t = ch.treePts[i];
+        const ddx = pos.x - t.x, ddz = pos.z - t.z;
+        const d2 = ddx * ddx + ddz * ddz;
+        if (d2 >= t.r2 || d2 < 1e-9) continue;
+        const d = Math.sqrt(d2);
+        const k = (t.r - d) / d;
+        pos.x += ddx * k;
+        pos.z += ddz * k;
+      }
+    }
   }
+  return pos;
 }
 
 function clearOfSpawn(x, z) {
@@ -410,6 +546,10 @@ function populateTrees(st, ch, ox, oz, far = false) {
       if (slopeAt(px, pz) > 2.5) continue;
       const s = 0.7 + rand01(rng) * 0.7;
       const y = getHeight(px, pz);
+      // Мягкая коллизия игрока: спрайты-деревья сами не коллят, а тонкий
+      // ствол-инстанс в своём чанке есть — радиус одинаков, чтобы не спорили.
+      const r = 0.12 * s + 0.35;
+      ch.treePts.push({ x: px, z: pz, r, r2: r * r });
       if (far) addTreeSprite(st, ch, px, y, pz, s, Math.abs(Math.round(px * 3 + pz)) % 3);
       else makeTreeInst(st, ch, px, y, pz, s, rand01(rng) * Math.PI * 2);
     }
@@ -438,22 +578,64 @@ function populateBushes(st, ch, ox, oz, far = false) {
 // Импостеры: те же позиции/масштабы, что у 3D — переход незаметен.
 // cellIndex = запечённый вариант (тот же оттенок, что выбрало бы 3D).
 // Индекс берётся по модулю числа ячеек, поэтому даже при фолбэке атласа
-// спрайт не вылезет за пределы текстуры (и не станет пустым).
+// карточка не вылезет за пределы текстуры (и не станет пустой).
+// Карточки копим на чанк, mesh'ы строит buildImpostorChunk. Жёсткого лимита
+// больше нет: дальних чанков всего 16 — ~400 деревьев и ~1900 кустов на лес.
 function addTreeSprite(st, ch, x, y, z, s, v) {
-  if (st.treeSM.sprites.length >= 590) return;
-  const sp = new BABYLON.Sprite("ftree", st.treeSM);
-  sp.position.set(x, y + 2.0 * s, z);
-  sp.width = sp._w = 2.4 * s; sp.height = sp._h = 4.4 * s;
-  sp.cellIndex = ((v % st.treeCells) + st.treeCells) % st.treeCells;
-  ch.sprites.push(sp);
+  const h = 4.4 * s;
+  ch.cards.tree.push({
+    x, z, y: y + 2.0 * s - h / 2, w: 2.4 * s, h,
+    cell: ((v % st.treeCells) + st.treeCells) % st.treeCells,
+  });
 }
 function addBushSprite(st, ch, x, y, z, s, v) {
-  if (st.bushSM.sprites.length >= 2490) return;
-  const sp = new BABYLON.Sprite("fbush", st.bushSM);
-  sp.position.set(x, y + 0.35 * s, z);
-  sp.width = sp._w = 1.1 * s; sp.height = sp._h = 0.8 * s;
-  sp.cellIndex = ((v % st.bushCells) + st.bushCells) % st.bushCells;
-  ch.sprites.push(sp);
+  const h = 0.8 * s;
+  ch.cards.bush.push({
+    x, z, y: y + 0.35 * s - h / 2, w: 1.1 * s, h,
+    cell: ((v % st.bushCells) + st.bushCells) % st.bushCells,
+  });
+}
+
+// Одна слитая карточка на чанк и на тип (1 draw call). Позиции — мировые,
+// база карточки (anchor) лежит отдельно: по ней шейдер доворачивает карточку
+// по yaw вокруг основания. Габарит по Z считаем как ±w/2, а не 0 — карточка
+// вращается вокруг основания и из плоской заготовки вылезает за её пределы.
+function buildImpostorChunk(st, ch) {
+  for (const kind of ["tree", "bush"]) {
+    const cards = ch.cards[kind];
+    if (!cards.length) continue;
+    const cols = kind === "tree" ? st.treeCols : st.bushCols;
+    const positions = [], uvs = [], anchors = [], normals = [], indices = [];
+    const min = new BABYLON.Vector3(Infinity, Infinity, Infinity);
+    const max = new BABYLON.Vector3(-Infinity, -Infinity, -Infinity);
+    for (const c of cards) {
+      const b = positions.length / 3;
+      const x0 = c.x - c.w / 2, x1 = c.x + c.w / 2, y1 = c.y + c.h;
+      positions.push(x0, y1, c.z, x1, y1, c.z, x0, c.y, c.z, x1, c.y, c.z);
+      for (let i = 0; i < 4; i++) { anchors.push(c.x, c.y, c.z); normals.push(0, 0, -1); }
+      const u0 = c.cell / cols, u1 = (c.cell + 1) / cols;
+      uvs.push(u0, 0, u1, 0, u0, 1, u1, 1);
+      indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+      if (x0 < min.x) min.x = x0;
+      if (x1 > max.x) max.x = x1;
+      if (c.y < min.y) min.y = c.y;
+      if (y1 > max.y) max.y = y1;
+      if (c.z - c.w / 2 < min.z) min.z = c.z - c.w / 2;
+      if (c.z + c.w / 2 > max.z) max.z = c.z + c.w / 2;
+    }
+    const mesh = new BABYLON.Mesh(`${kind}Imp_${ch.cx}_${ch.cz}`, st.scene);
+    const vd = new BABYLON.VertexData();
+    vd.positions = positions; vd.uvs = uvs; vd.normals = normals; vd.indices = indices;
+    vd.applyToMesh(mesh);
+    // stride обязателен: у нестандартного kind нет DeduceStride
+    mesh.setVerticesData("anchor", anchors, false, 3);
+    mesh.setBoundingInfo(new BABYLON.BoundingInfo(min, max));
+    mesh.material = kind === "tree" ? st.treeMat : st.bushMat;
+    mesh.isPickable = false;
+    mesh.checkCollisions = false;
+    mesh.freezeWorldMatrix();
+    ch.sprites.push(mesh);
+  }
 }
 
 function makeTreeInst(st, ch, x, y, z, s, rotY) {
@@ -464,6 +646,8 @@ function makeTreeInst(st, ch, x, y, z, s, rotY) {
   trunk.isPickable = true;
   trunk.checkCollisions = true;
   trunk.metadata = { kind: "tree" };
+  // Статика: без пересчёта world matrix каждый кадр (тысячи инстансов)
+  trunk.freezeWorldMatrix();
   ch.nodes.push(trunk);
   const leafTpl = st.leafTpls[Math.abs(Math.round(x * 3 + z)) % 3];
   [[0, 2.75, 0, 1.6], [0.1, 3.1, -0.1, 1.3], [-0.1, 3.45, 0.1, 1.0]].forEach(([ox, oy, oz, d]) => {
@@ -472,6 +656,7 @@ function makeTreeInst(st, ch, x, y, z, s, rotY) {
     leaf.position.set(x + (ox * ca - oz * sa) * s, y + oy * s, z + (ox * sa + oz * ca) * s);
     leaf.scaling.setAll(d * s);
     leaf.isPickable = false;
+    leaf.freezeWorldMatrix();
     ch.nodes.push(leaf);
   });
 }
@@ -483,6 +668,7 @@ function makeBushInst(st, ch, x, y, z, s) {
     b.position.set(x + ox * s, y + oy * s, z + oz * s);
     b.scaling.setAll(d * s);
     b.isPickable = false;
+    b.freezeWorldMatrix();
     ch.nodes.push(b);
   });
 }
