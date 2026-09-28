@@ -381,33 +381,79 @@ export function initTerrain(scene) {
 
 function chunkKey(cx, cz) { return cx + "," + cz; }
 
-// Каждый кадр из main.js: догрузка вокруг игрока и вокруг активной камеры
-// монитора (ex, ez — второй центр; без него в кадре фида дыры в земле),
-// выгрузка дальних. Строим ВСЁ недостающее сразу (как _reload_chunks в Godot):
-// бюджет по 2 давал дыры без земли на границах — игрок проваливался.
-// Постройка чанка дешёвая (~1мс).
-export function updateTerrain(st, px, pz, ex, ez) {
+// Конус взгляда фида: грузим землю/лес ВПЕРЁД по направлению камеры монитора,
+// дальше кольца ±80м. Сектором на ВЕСЬ горизонтальный fov (110° вертикальный при
+// RT 480x270 → ±68.5°) + запас: иначе боковые thirds экрана дальше80м остаются
+// пустыми при любом повороте. Глубина224м — туман EXP2 0.008 к250м почти
+// непрозрачен, край сектора в дымке. FEED_RETAIN: чанки вокруг фида не
+// выгружаем, чтобы повороты туда-сюда не перестраивали их заново (~1мс на чанк).
+const CONE_DEPTH = 7;
+const CONE_HALF = 74 * Math.PI / 180; // 68.5° (полу-fov) + 5.5° запас на поворот
+const FEED_RETAIN = 8;
+const CHUNK_HALF_DIAG = (CHUNK_WORLD * Math.SQRT2) / 2;
+
+// Каждый кадр из main.js: догрузка вокруг игрока, вокруг активной камеры
+// монитора (ex, ez — второй центр; без него в кадре фида дыры в земле) и
+// конусом вдоль её взгляда (efx, efz), выгрузка дальних. Строим ВСЁ
+// недостающее сразу (как _reload_chunks в Godot): бюджет по 2 давал
+// дыры без земли на границах — игрок проваливался. Постройка чанка ~1мс.
+export function updateTerrain(st, px, pz, ex, ez, efx, efz) {
   const ccx = Math.floor(px / CHUNK_WORLD), ccz = Math.floor(pz / CHUNK_WORLD);
   const want = new Set();
   const missing = [];
+  const add = (cx, cz) => {
+    const k = chunkKey(cx, cz);
+    if (want.has(k)) return;
+    want.add(k);
+    if (!st.chunks.has(k)) {
+      const rx = cx - ccx, rz = cz - ccz;
+      missing.push([cx, cz, rx * rx + rz * rz]); // ближе к игроку — строим раньше
+    }
+  };
   const ring = (ecx, ecz) => {
-    for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
-      for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++) {
-        const cx = ecx + dx, cz = ecz + dz;
-        const k = chunkKey(cx, cz);
-        if (want.has(k)) continue;
-        want.add(k);
-        if (!st.chunks.has(k)) {
-          const rx = cx - ccx, rz = cz - ccz;
-          missing.push([cx, cz, rx * rx + rz * rz]); // ближе к игроку — строим раньше
+    for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++)
+      for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++)
+        add(ecx + dx, ecz + dz);
+  };
+  ring(ccx, ccz);
+  const hasFeed = ex !== null && ex !== undefined;
+  let fcx = 0, fcz = 0;
+  if (hasFeed) {
+    fcx = Math.floor(ex / CHUNK_WORLD); fcz = Math.floor(ez / CHUNK_WORLD);
+    ring(fcx, fcz);
+    const fl = Math.hypot(efx, efz);
+    if (fl > 1e-6) {
+      const fx = efx / fl, fz = efz / fl;
+      // Полярный сектор: чанк попадает, если его центр ближе maxR к камере и
+      // угол к оси взгляда меньше CONE_HALF. Запас atan(полудиагональ/дистанция):
+      // у чанка, у которого в fov угла только, грузим весь — иначе ступеньки.
+      const maxR = CONE_DEPTH * CHUNK_WORLD + CHUNK_HALF_DIAG;
+      const lim2 = maxR * maxR;
+      const rmax = CONE_DEPTH + 1;
+      for (let cx = fcx - rmax; cx <= fcx + rmax; cx++) {
+        for (let cz = fcz - rmax; cz <= fcz + rmax; cz++) {
+          const mx = cx * CHUNK_WORLD + CHUNK_WORLD / 2 - ex;
+          const mz = cz * CHUNK_WORLD + CHUNK_WORLD / 2 - ez;
+          const d2 = mx * mx + mz * mz;
+          if (d2 > lim2) continue;
+          const d = Math.sqrt(d2);
+          if (d > 1e-3) {
+            const cos = (mx * fx + mz * fz) / d;
+            const ang = Math.acos(cos < -1 ? -1 : cos > 1 ? 1 : cos);
+            if (ang > CONE_HALF + Math.atan2(CHUNK_HALF_DIAG, d)) continue;
+          }
+          add(cx, cz);
         }
       }
     }
-  };
-  ring(ccx, ccz);
-  if (ex !== null && ex !== undefined) ring(Math.floor(ex / CHUNK_WORLD), Math.floor(ez / CHUNK_WORLD));
+  }
   for (const [k, ch] of st.chunks) {
-    if (!want.has(k)) { disposeChunk(ch); st.chunks.delete(k); continue; }
+    if (!want.has(k)) {
+      const near = hasFeed &&
+        Math.max(Math.abs(ch.cx - fcx), Math.abs(ch.cz - fcz)) <= FEED_RETAIN;
+      if (near) continue; // удержание: конус свернул — чанки на своём месте
+      disposeChunk(ch); st.chunks.delete(k); continue;
+    }
     // Чанк был построен дальним (спрайты), а игрок вошёл в него — перестроить
     // в полном качестве (и наоборот). 3D-лес остался только в чанке игрока:
     // кольцо и даль — 2D-спрайты (жёсткая оптимизация: ~9x меньше инстансов).

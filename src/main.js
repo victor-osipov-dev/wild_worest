@@ -19,6 +19,9 @@ scene.collisionsEnabled = true;
 scene.fogMode = BABYLON.Scene.FOGMODE_EXP2;
 scene.fogDensity = 0.008;
 scene.fogColor = new BABYLON.Color3(0.16, 0.18, 0.24);
+// Фон = цвет тумана: то, что за пределами подгрузки (в т.ч. по краям конуса
+// взгляда фида), читается как дымка, а не как синева пустоты.
+scene.clearColor = new BABYLON.Color4(0.16, 0.18, 0.24, 1);
 scene.gravity = new BABYLON.Vector3(0, -9.8, 0);
 
 const camera = new BABYLON.UniversalCamera("FPS", new BABYLON.Vector3(0, 1.5, -14), scene);
@@ -363,10 +366,12 @@ engine.runRenderLoop(() => {
     if (mgr.marked !== -1 && !mgr.list[mgr.marked]) mgr.marked = -1;
     setScreenStandby();
   }
-  // Земля грузится вокруг игрока И вокруг активной камеры монитора: без второго
-  // центра в кадре фида дыры, виден синеватый clearColor сцены (0.2,0.2,0.3).
+  // Земля грузится вокруг игрока, вокруг активной камеры монитора и конусом
+  // вдоль её взгляда: без второго центра в кадре фида дыры, а дальше кольца
+  // ±80м по направлению камеры — пустота (виден clearColor сцены).
   updateTerrain(terrain, player.mesh.position.x, player.mesh.position.z,
-    feedDir ? feedCam.position.x : null, feedDir ? feedCam.position.z : null);
+    feedDir ? feedCam.position.x : null, feedDir ? feedCam.position.z : null,
+    feedDir ? feedDir.x : null, feedDir ? feedDir.z : null);
   cullTerrainChunks(terrain, camera.position, camera.getDirection(new BABYLON.Vector3(0, 0, 1)),
     Math.floor(player.mesh.position.x / 32), Math.floor(player.mesh.position.z / 32),
     feedDir ? feedCam.position : null, feedDir);
