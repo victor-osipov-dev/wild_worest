@@ -381,21 +381,31 @@ export function initTerrain(scene) {
 
 function chunkKey(cx, cz) { return cx + "," + cz; }
 
-// Каждый кадр из main.js: догрузка вокруг игрока, выгрузка дальних.
-// Строим ВСЁ недостающее сразу (как _reload_chunks в Godot): бюджет по 2 давал
-// дыры без земли на границах — игрок проваливался. Постройка чанка дешёвая (~1мс).
-export function updateTerrain(st, px, pz) {
+// Каждый кадр из main.js: догрузка вокруг игрока и вокруг активной камеры
+// монитора (ex, ez — второй центр; без него в кадре фида дыры в земле),
+// выгрузка дальних. Строим ВСЁ недостающее сразу (как _reload_chunks в Godot):
+// бюджет по 2 давал дыры без земли на границах — игрок проваливался.
+// Постройка чанка дешёвая (~1мс).
+export function updateTerrain(st, px, pz, ex, ez) {
   const ccx = Math.floor(px / CHUNK_WORLD), ccz = Math.floor(pz / CHUNK_WORLD);
   const want = new Set();
   const missing = [];
-  for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
-    for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++) {
-      const cx = ccx + dx, cz = ccz + dz;
-      const k = chunkKey(cx, cz);
-      want.add(k);
-      if (!st.chunks.has(k)) missing.push([cx, cz, dx * dx + dz * dz]);
+  const ring = (ecx, ecz) => {
+    for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
+      for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++) {
+        const cx = ecx + dx, cz = ecz + dz;
+        const k = chunkKey(cx, cz);
+        if (want.has(k)) continue;
+        want.add(k);
+        if (!st.chunks.has(k)) {
+          const rx = cx - ccx, rz = cz - ccz;
+          missing.push([cx, cz, rx * rx + rz * rz]); // ближе к игроку — строим раньше
+        }
+      }
     }
-  }
+  };
+  ring(ccx, ccz);
+  if (ex !== null && ex !== undefined) ring(Math.floor(ex / CHUNK_WORLD), Math.floor(ez / CHUNK_WORLD));
   for (const [k, ch] of st.chunks) {
     if (!want.has(k)) { disposeChunk(ch); st.chunks.delete(k); continue; }
     // Чанк был построен дальним (спрайты), а игрок вошёл в него — перестроить
@@ -464,20 +474,36 @@ function buildChunk(st, cx, cz, far = false) {
 // Не отображать чанки, которые камера не видит: только ВНЕШНЕЕ кольцо (chebyshev>=2
 // от чанка игрока — земля под ногами и соседи не гаснут никогда) + позади камеры.
 // Видимое frustum-culling и так отсекает, это сверху снимает нагрузку с CPU-обхода.
+// feedPos/feedFwd (кадр монитора): кольцо вокруг фида не гасим, чанк гасим только
+// если он позади ОБЕИХ камер — иначе в кадре фида дыры в земле.
 const _toChunk = new BABYLON.Vector3();
 const _camDir = new BABYLON.Vector3();
-export function cullTerrainChunks(st, camPos, camFwd, pcx, pcz) {
+const _feedDir = new BABYLON.Vector3();
+export function cullTerrainChunks(st, camPos, camFwd, pcx, pcz, feedPos, feedFwd) {
   _camDir.copyFrom(camFwd);
+  const hasFeed = !!(feedPos && feedFwd);
+  let ffcx = 0, ffcz = 0;
+  if (hasFeed) {
+    _feedDir.copyFrom(feedFwd);
+    ffcx = Math.floor(feedPos.x / CHUNK_WORLD);
+    ffcz = Math.floor(feedPos.z / CHUNK_WORLD);
+  }
+  const keepVisible = (ch) => {
+    if (!ch.visible) { ch.visible = true; setChunkVisible(ch, true); }
+  };
   for (const [, ch] of st.chunks) {
-    if (Math.max(Math.abs(ch.cx - pcx), Math.abs(ch.cz - pcz)) < 2) {
-      if (!ch.visible) { ch.visible = true; setChunkVisible(ch, true); }
-      continue;
-    }
+    if (Math.max(Math.abs(ch.cx - pcx), Math.abs(ch.cz - pcz)) < 2) { keepVisible(ch); continue; }
+    if (hasFeed && Math.max(Math.abs(ch.cx - ffcx), Math.abs(ch.cz - ffcz)) < 2) { keepVisible(ch); continue; }
     _toChunk.set(
       ch.cx * CHUNK_WORLD + CHUNK_WORLD / 2 - camPos.x, 0,
       ch.cz * CHUNK_WORLD + CHUNK_WORLD / 2 - camPos.z);
-    const proj = _toChunk.x * _camDir.x + _toChunk.z * _camDir.z;
-    const behind = proj < -24;
+    let behind = _toChunk.x * _camDir.x + _toChunk.z * _camDir.z < -24;
+    if (behind && hasFeed) {
+      _toChunk.set(
+        ch.cx * CHUNK_WORLD + CHUNK_WORLD / 2 - feedPos.x, 0,
+        ch.cz * CHUNK_WORLD + CHUNK_WORLD / 2 - feedPos.z);
+      behind = _toChunk.x * _feedDir.x + _toChunk.z * _feedDir.z < -24;
+    }
     if (behind === !ch.visible) continue; // уже в нужном состоянии
     ch.visible = !behind;
     setChunkVisible(ch, ch.visible);

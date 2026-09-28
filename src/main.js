@@ -42,12 +42,13 @@ feedRT.refreshRate = 3; // фид не каждый кадр — экономи�
 const feedCam = new BABYLON.UniversalCamera("FeedCam", new BABYLON.Vector3(0, 24, 0), scene);
 feedCam.setTarget(BABYLON.Vector3.Zero());
 feedCam.fov = 110 * Math.PI / 180;
+feedCam.minZ = 0.05; // камера почти на земле: minZ=1 срезал низ кадра до clearColor
 feedCam.layerMask = 0x0FFFFFFF & ~0x2; // без слоя игрока (как cull_mask без layer2)
 feedRT.activeCamera = feedCam;
 feedRT.renderList = null; // рендерит всю сцену
 scene.customRenderTargets.push(feedRT);
-screenMat.emissiveTexture = feedRT;
-screenMat.diffuseTexture = feedRT;
+// Экран стартует ЧЁРНЫМ: текстуру фида вешаем только когда есть камеры
+// (setScreenOn в цикле — mgr.list[mgr.active] существует).
 mgr.feedRT = feedRT; mgr.feedCam = feedCam;
 
 const input = { f: false, b: false, l: false, r: false, jump: false };
@@ -335,9 +336,40 @@ engine.runRenderLoop(() => {
   last = now;
   if (!started || paused) { scene.render(); return; }
 
-  updateTerrain(terrain, player.mesh.position.x, player.mesh.position.z);
+  // Монитор как в camera_manager._process: поворот стрелками/WASD 2.0 рад/с,
+  // фид-камера = активная * yaw * pitch каждый кадр, экран гаснет без камер.
+  // Горизонталь как у мыши игрока: A/← влево (yaw -), D/→ вправо (yaw +).
+  if (mgr.monitorActive) {
+    const rot = 2.0 * dt;
+    let yaw = 0, pitch = 0;
+    if (input.l) yaw -= rot;
+    if (input.r) yaw += rot;
+    if (input.f) pitch += rot;
+    if (input.b) pitch -= rot;
+    mgr.yaw = clamp(mgr.yaw + yaw, -75 * Math.PI / 180, 75 * Math.PI / 180);
+    mgr.pitch = clamp(mgr.pitch + pitch, -85 * Math.PI / 180, 85 * Math.PI / 180);
+  }
+  const activeCam = mgr.list[mgr.active];
+  let feedDir = null;
+  if (activeCam && !activeCam.isDisposed()) {
+    setScreenOn();
+    const yawQ = BABYLON.Quaternion.RotationYawPitchRoll(activeCam.rotation.y + mgr.yaw, mgr.pitch, 0);
+    feedDir = new BABYLON.Vector3(0, 0, -1).applyRotationQuaternion(yawQ);
+    feedCam.position.copyFrom(activeCam.position);
+    feedCam.setTarget(activeCam.position.add(feedDir));
+    if (mgr.monitorActive) $("camLabel").textContent = `Камера ${mgr.active + 1} из ${mgr.list.length}`;
+  } else {
+    if (mgr.active !== -1) { mgr.active = -1; mgr.yaw = 0; mgr.pitch = 0; }
+    if (mgr.marked !== -1 && !mgr.list[mgr.marked]) mgr.marked = -1;
+    setScreenStandby();
+  }
+  // Земля грузится вокруг игрока И вокруг активной камеры монитора: без второго
+  // центра в кадре фида дыры, виден синеватый clearColor сцены (0.2,0.2,0.3).
+  updateTerrain(terrain, player.mesh.position.x, player.mesh.position.z,
+    feedDir ? feedCam.position.x : null, feedDir ? feedCam.position.z : null);
   cullTerrainChunks(terrain, camera.position, camera.getDirection(new BABYLON.Vector3(0, 0, 1)),
-    Math.floor(player.mesh.position.x / 32), Math.floor(player.mesh.position.z / 32));
+    Math.floor(player.mesh.position.x / 32), Math.floor(player.mesh.position.z / 32),
+    feedDir ? feedCam.position : null, feedDir);
   if (debugOn) {
     debugT -= dt;
     if (debugT <= 0) {
@@ -418,31 +450,6 @@ engine.runRenderLoop(() => {
     }
   }
 
-  // Монитор как в camera_manager._process: поворот стрелками/WASD 2.0 рад/с,
-  // фид-камера = активная * yaw * pitch каждый кадр, экран гаснет без камер
-  if (mgr.monitorActive) {
-    const rot = 2.0 * dt;
-    let yaw = 0, pitch = 0;
-    if (input.l) yaw += rot;
-    if (input.r) yaw -= rot;
-    if (input.f) pitch += rot;
-    if (input.b) pitch -= rot;
-    mgr.yaw = clamp(mgr.yaw + yaw, -75 * Math.PI / 180, 75 * Math.PI / 180);
-    mgr.pitch = clamp(mgr.pitch + pitch, -85 * Math.PI / 180, 85 * Math.PI / 180);
-  }
-  const activeCam = mgr.list[mgr.active];
-  if (activeCam && !activeCam.isDisposed()) {
-    setScreenOn();
-    const yawQ = BABYLON.Quaternion.RotationYawPitchRoll(activeCam.rotation.y + mgr.yaw, mgr.pitch, 0);
-    const dir = new BABYLON.Vector3(0, 0, -1).applyRotationQuaternion(yawQ);
-    feedCam.position.copyFrom(activeCam.position);
-    feedCam.setTarget(activeCam.position.add(dir));
-    if (mgr.monitorActive) $("camLabel").textContent = `Камера ${mgr.active + 1} из ${mgr.list.length}`;
-  } else {
-    if (mgr.active !== -1) { mgr.active = -1; mgr.yaw = 0; mgr.pitch = 0; }
-    if (mgr.marked !== -1 && !mgr.list[mgr.marked]) mgr.marked = -1;
-    setScreenStandby();
-  }
   if (mgr.toastT > 0) { mgr.toastT -= dt; if (mgr.toastT <= 0) $("toast").style.display = "none"; }
   // стрелка на метку
   const nav = $("navArrow");

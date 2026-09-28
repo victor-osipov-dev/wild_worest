@@ -13,6 +13,33 @@ export function buildHouse(scene) {
   const woodMat = new BABYLON.StandardMaterial("woodMat", scene);
   woodMat.diffuseTexture = woodTex;
   woodMat.specularColor = new BABYLON.Color3(0, 0, 0); // дерево матовое — без бликов
+  const darkWoodMat = new BABYLON.StandardMaterial("darkWoodMat", scene);
+  darkWoodMat.diffuseColor = new BABYLON.Color3(0.32, 0.19, 0.1);
+  darkWoodMat.specularColor = new BABYLON.Color3(0, 0, 0);
+  const plasticMat = new BABYLON.StandardMaterial("monPlasticMat", scene);
+  plasticMat.diffuseColor = new BABYLON.Color3(0.08, 0.08, 0.09);
+  plasticMat.specularColor = new BABYLON.Color3(0.03, 0.03, 0.03); // пластик — едва заметный sheen
+  const fabricMat = new BABYLON.StandardMaterial("fabricMat", scene);
+  fabricMat.diffuseColor = new BABYLON.Color3(0.78, 0.75, 0.66);
+  fabricMat.specularColor = new BABYLON.Color3(0, 0, 0);
+  const pillowMat = new BABYLON.StandardMaterial("pillowMat", scene);
+  pillowMat.diffuseColor = new BABYLON.Color3(0.9, 0.88, 0.82);
+  pillowMat.specularColor = new BABYLON.Color3(0, 0, 0);
+  const blanketMat = new BABYLON.StandardMaterial("blanketMat", scene);
+  blanketMat.diffuseColor = new BABYLON.Color3(0.45, 0.12, 0.14);
+  blanketMat.specularColor = new BABYLON.Color3(0, 0, 0);
+  const metalMat = new BABYLON.StandardMaterial("metalMat", scene);
+  metalMat.diffuseColor = new BABYLON.Color3(0.7, 0.66, 0.55);
+  metalMat.specularColor = new BABYLON.Color3(0.3, 0.3, 0.3); // металл может бликовать — реалистично
+  // Коробка-мебель: parent = root (позиции относительно дома)
+  const mkBox = (name, w, h, d, x, y, z, mat, opt = {}) => {
+    const m = BABYLON.MeshBuilder.CreateBox(name, { width: w, height: h, depth: d }, scene);
+    m.position.set(x, y, z); m.material = mat; m.parent = root;
+    if (opt.collide) m.checkCollisions = true;
+    if (opt.pick === false) m.isPickable = false;
+    if (opt.meta) m.metadata = opt.meta;
+    return m;
+  };
   const floor = BABYLON.MeshBuilder.CreateBox("floor", { width: 5.2, height: 0.2, depth: 4.8 }, scene);
   floor.position.y = -0.1; floor.material = woodMat; floor.parent = root;
   floor.checkCollisions = true; floor.isPickable = true; floor.metadata = { kind: "house" };
@@ -85,17 +112,31 @@ export function buildHouse(scene) {
   };
   mkGable(2.4); mkGable(-2.4);
 
-  // --- Дверь: DoorPivot в (0.45,0.975,-2.17) отн. дома, открывается на -100°, E в радиусе 4м ---
+  // --- Дверь: DoorPivot в (0.45,1.0,-2.17) отн. дома, полотно 2.0 вплотную под
+  // потолок проёма (0..2.0, иначе сверху щель), открывается на -100°, E в радиусе 4м ---
   const pivot = new BABYLON.TransformNode("DoorPivot", scene);
-  pivot.position = new BABYLON.Vector3(HOUSE.x + 0.45, 0.975, HOUSE.z - 2.17);
-  const doorMesh = BABYLON.MeshBuilder.CreateBox("door", { width: 0.9, height: 1.95, depth: 0.06 }, scene);
+  pivot.position = new BABYLON.Vector3(HOUSE.x + 0.45, 1.0, HOUSE.z - 2.17);
+  const doorMesh = BABYLON.MeshBuilder.CreateBox("door", { width: 0.9, height: 2.0, depth: 0.06 }, scene);
   doorMesh.position.x = -0.45; doorMesh.parent = pivot;
   const doorMat = new BABYLON.StandardMaterial("doorMat", scene);
   doorMat.diffuseColor = new BABYLON.Color3(0.4, 0.25, 0.12);
   doorMat.specularColor = new BABYLON.Color3(0, 0, 0);
   doorMesh.material = doorMat; doorMesh.checkCollisions = true;
-  const knob = BABYLON.MeshBuilder.CreateSphere("knob", { diameter: 0.09 }, scene);
-  knob.position.set(-0.75, 0, 0.08); knob.parent = doorMesh;
+  const knob = BABYLON.MeshBuilder.CreateSphere("knob", { diameter: 0.08 }, scene);
+  // Локальные координаты двери: полотно 0.9 → x ±0.45, петли со стороны pivot (+0.45),
+  // значит ручка у свободного края: x = -0.37 (раньше -0.75 торчала ВНЕ полотна).
+  knob.position.set(-0.37, 0, 0.055); knob.parent = doorMesh; knob.material = metalMat;
+  knob.isPickable = false;
+  const knobBack = knob.clone("knobBack");
+  knobBack.position.set(-0.37, 0, -0.055); knobBack.parent = doorMesh;
+  const trimMat = new BABYLON.StandardMaterial("doorTrimMat", scene);
+  trimMat.diffuseColor = new BABYLON.Color3(0.3, 0.18, 0.09);
+  trimMat.specularColor = new BABYLON.Color3(0, 0, 0);
+  for (const z of [0.038, -0.038]) { // накладки-панели на обеих сторонах полотна
+    const inset = BABYLON.MeshBuilder.CreateBox("doorInset", { width: 0.62, height: 1.5, depth: 0.016 }, scene);
+    inset.position.set(0, 0, z); inset.material = trimMat; inset.parent = doorMesh;
+    inset.isPickable = false;
+  }
   const door = { pivot, open: false, target: 0, OPEN: -100 * Math.PI / 180, SPEED: 2.2,
     hintPos: new BABYLON.Vector3(HOUSE.x + 0.45, 2.4, HOUSE.z - 2.17) };
   doorMesh.metadata = { kind: "door" };
@@ -110,22 +151,35 @@ export function buildHouse(scene) {
   glassMesh.metadata = { kind: "glass" };
   const glass = { mesh: glassMesh, broken: false };
 
-  // --- Стол/кровать/монитор: экран 0.92x0.5175, монитор-свет ---
-  const table = BABYLON.MeshBuilder.CreateBox("table", { width: 1.4, height: 0.08, depth: 0.7 }, scene);
-  table.position = new BABYLON.Vector3(HOUSE.x - 1.2, 0.75, HOUSE.z - 1.2);
-  table.material = woodMat; table.checkCollisions = true;
-  const screen = BABYLON.MeshBuilder.CreatePlane("Screen", { width: 0.92, height: 0.5175 }, scene);
-  screen.position = new BABYLON.Vector3(HOUSE.x - 1.2, 1.25, HOUSE.z - 1.2);
-  screen.rotation.y = Math.PI / 2;
+  // --- Стол у ПРАВОЙ стены (как кровать): глубина вдоль X к стене, длина вдоль Z ---
+  mkBox("tableTop", 0.95, 0.08, 1.4, 1.875, 0.75, -0.6, woodMat, { collide: true });
+  for (const dx of [-0.4, 0.4])
+    for (const dz of [-0.63, 0.63])
+      mkBox("tableLeg", 0.07, 0.71, 0.07, 1.875 + dx, 0.355, -0.6 + dz, darkWoodMat);
+
+  // --- Монитор на столе лицом ОТ стены в комнату (-X): игрок видит экран из центра
+  // и у двери. Подставка: длинная ось (0.34) по X К СТЕНЕ — за экраном, как у настоящего
+  // монитора (при взгляде вдоль стены боком она читалась как «перевёрнутая на 180°»).
+  mkBox("monBase", 0.34, 0.03, 0.26, 2.15, 0.805, -0.6, plasticMat);
+  mkBox("monNeck", 0.06, 0.16, 0.07, 2.105, 0.9, -0.6, plasticMat);
+  mkBox("monBezel", 0.05, 0.53, 0.88, 2.05, 1.24, -0.6, plasticMat);
+  const screen = BABYLON.MeshBuilder.CreatePlane("Screen", { width: 0.8, height: 0.45 }, scene);
+  screen.parent = root;
+  screen.position.set(2.022, 1.24, -0.6);
+  screen.rotation.y = Math.PI / 2; // нормаль -X: от стены на игрока
   const screenMat = new BABYLON.StandardMaterial("screenMat", scene);
   screenMat.diffuseColor = new BABYLON.Color3(0.02, 0.03, 0.05);
   screenMat.emissiveColor = new BABYLON.Color3(0.02, 0.03, 0.05);
   screen.material = screenMat;
   screen.metadata = { kind: "monitor" };
   screen.layerMask = 0x2; // не рендерится в собственный фид (без рекурсии)
-  const bed = BABYLON.MeshBuilder.CreateBox("bed", { width: 2.0, height: 0.4, depth: 1.0 }, scene);
-  bed.position = new BABYLON.Vector3(HOUSE.x + 1.2, 0.2, HOUSE.z + 1.4);
-  bed.material = wallMat; bed.checkCollisions = true;
+
+  // --- Кровать: каркас, матрас, одеяло, подушка, изголовье у правой стены ---
+  mkBox("bedFrame", 2.0, 0.3, 1.0, 1.2, 0.15, 1.4, darkWoodMat, { collide: true });
+  mkBox("mattress", 1.9, 0.16, 0.9, 1.2, 0.38, 1.4, fabricMat);
+  mkBox("blanket", 1.25, 0.07, 0.92, 0.95, 0.49, 1.4, blanketMat); // на кровати, не свисает в ноги
+  mkBox("pillow", 0.45, 0.12, 0.62, 1.92, 0.52, 1.4, pillowMat);
+  mkBox("headboard", 0.08, 0.75, 1.0, 2.27, 0.375, 1.4, darkWoodMat, { collide: true });
   const lamp = new BABYLON.PointLight("InteriorLight", new BABYLON.Vector3(HOUSE.x, 2.0, HOUSE.z), scene);
   lamp.diffuse = new BABYLON.Color3(1, 0.85, 0.6); lamp.intensity = 2.5; lamp.range = 7;
   lamp.specular = new BABYLON.Color3(0, 0, 0); // чисто диффузный свет в доме — бликов нет
