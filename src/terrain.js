@@ -390,6 +390,9 @@ function chunkKey(cx, cz) { return cx + "," + cz; }
 const CONE_DEPTH = 7;
 const CONE_HALF = 74 * Math.PI / 180; // 68.5° (полу-fov) + 5.5° запас на поворот
 const FEED_RETAIN = 8;
+const FEED_FULL_R = 1; // 3x3 вокруг фида — полное 3D-качество (как у игрока),
+// иначе у фида вместо леса плоские спрайты-импостеры: wantFar раньше смотрел
+// только на игрока, и стоило отойти к монитору — лес у камеры схлопывался.
 const CHUNK_HALF_DIAG = (CHUNK_WORLD * Math.SQRT2) / 2;
 
 // Каждый кадр из main.js: догрузка вокруг игрока, вокруг активной камеры
@@ -455,10 +458,14 @@ export function updateTerrain(st, px, pz, ex, ez, efx, efz) {
       disposeChunk(ch); st.chunks.delete(k); continue;
     }
     // Чанк был построен дальним (спрайты), а игрок вошёл в него — перестроить
-    // в полном качестве (и наоборот). 3D-лес остался только в чанке игрока:
-    // кольцо и даль — 2D-спрайты (жёсткая оптимизация: ~9x меньше инстансов).
+    // в полном качестве (и наоборот). Полное качество — чанк игрока И кольцо
+    // вокруг активной камеры фида (FEED_FULL_R): иначе у фида вместо леса
+    // плоские спрайты-импостеры. Дальше колец — 2D-спрайты (жёсткая
+    // оптимизация: ~9x меньше инстансов).
     const [chx, chz] = k.split(",").map(Number);
-    const wantFar = Math.max(Math.abs(chx - ccx), Math.abs(chz - ccz)) > 0;
+    const feedFull = hasFeed &&
+      Math.max(Math.abs(chx - fcx), Math.abs(chz - fcz)) <= FEED_FULL_R;
+    const wantFar = Math.max(Math.abs(chx - ccx), Math.abs(chz - ccz)) > 0 && !feedFull;
     if (ch.far !== wantFar) missing.push([chx, chz, 0]);
   }
   if (!missing.length) return;
@@ -466,8 +473,10 @@ export function updateTerrain(st, px, pz, ex, ez, efx, efz) {
   for (const [cx, cz] of missing) {
     const k = chunkKey(cx, cz);
     if (st.chunks.has(k)) { disposeChunk(st.chunks.get(k)); st.chunks.delete(k); }
+    const feedFull = hasFeed &&
+      Math.max(Math.abs(cx - fcx), Math.abs(cz - fcz)) <= FEED_FULL_R;
     st.chunks.set(k, buildChunk(st, cx, cz,
-      Math.max(Math.abs(cx - ccx), Math.abs(cz - ccz)) > 0));
+      Math.max(Math.abs(cx - ccx), Math.abs(cz - ccz)) > 0 && !feedFull));
   }
 }
 

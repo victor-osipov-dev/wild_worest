@@ -48,7 +48,25 @@ feedCam.fov = 110 * Math.PI / 180;
 feedCam.minZ = 0.05; // камера почти на земле: minZ=1 срезал низ кадра до clearColor
 feedCam.layerMask = 0x0FFFFFFF & ~0x2; // без слоя игрока (как cull_mask без layer2)
 feedRT.activeCamera = feedCam;
-feedRT.renderList = null; // рендерит всю сцену
+// RenderTargetTexture без renderList рендерит scene.getActiveMeshes() — набор,
+// посчитанный для scene.activeCamera (игрок): на фиде оказывался только сектор,
+// совпадающий с конусом взгляда игрока, остальной кадр — clearColor.
+// Явный список строим сами по фрустуму feed-камеры (слой 0x2 отфильтровываем,
+// т.к. для явного списка layerMask в рендере не проверяется).
+const feedVP = new BABYLON.Matrix();
+feedRT.getCustomRenderList = () => {
+  feedCam.getViewMatrix().multiplyToRef(feedCam.getProjectionMatrix(true), feedVP);
+  const planes = BABYLON.Frustum.GetPlanes(feedVP);
+  const out = [];
+  const meshes = scene.meshes;
+  for (let i = 0; i < meshes.length; i++) {
+    const m = meshes[i];
+    if (m.isBlocked || !m.isVisible || (m.layerMask & feedCam.layerMask) === 0) continue;
+    m.computeWorldMatrix();
+    if (m.isInFrustum(planes)) out.push(m);
+  }
+  return out;
+};
 scene.customRenderTargets.push(feedRT);
 // Экран стартует ЧЁРНЫМ: текстуру фида вешаем только когда есть камеры
 // (setScreenOn в цикле — mgr.list[mgr.active] существует).
