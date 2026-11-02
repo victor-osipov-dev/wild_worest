@@ -343,7 +343,7 @@ $("pause").style.display = "none";
 for (let i = 0; i < 4; i++) {
   const a = 2 + i * 1.5, r = 20 + i * 4;
   const x = Math.cos(a) * r, z = Math.sin(a) * r - 10;
-  spawnAnimal(scene, ["rabbit", "fox", "wolf", "bear"][i % 4], new BABYLON.Vector3(x, getHeight(x, z) + 0.5, z));
+  spawnAnimal(scene, ["rabbit", "fox", "wolf"][i % 3], new BABYLON.Vector3(x, getHeight(x, z) + 0.5, z));
 }
 
 // ---------- цикл ----------

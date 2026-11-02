@@ -1,5 +1,5 @@
 // Террейн бесконечный как в terrain.gd: чанки 32м (tile 2м) догружаются вокруг
-// игрока 5x5 (VIEW_RADIUS=2), дальние выгружаются. Растительность — по клеткам
+// игрока 9x9 (VIEW_RADIUS=4), дальние выгружаются. Растительность — по клеткам
 // внутри чанка (оригинальный алгоритм: spacing/density/jitter/clear/slope).
 // Всё через InstancedMesh + общие материалы (иначе Out of Memory).
 // getHeight() из noise.js — единый источник высоты для игрока и мобов.
@@ -7,7 +7,7 @@ import * as BABYLON from "@babylonjs/core";
 import { getHeight, cellHash, rand01, HOUSE_POS } from "./noise.js";
 import { asset } from "./assets.js";
 
-export const TILE = 2.0, CHUNK_TILES = 16, CHUNK_WORLD = 32, VIEW_RADIUS = 2;
+export const TILE = 2.0, CHUNK_TILES = 8, CHUNK_WORLD = 16, VIEW_RADIUS = 4, TREE_3D_R = 1;
 
 // Импостеры дальнего леса.
 // SpriteManager билбордил карточку ЦЕЛИКОМ — в плоскость камеры и вокруг её
@@ -21,6 +21,7 @@ attribute vec2 uv;
 attribute vec3 anchor;
 uniform mat4 view;
 uniform mat4 viewProjection;
+uniform float vFlip;
 varying vec2 vUV;
 #include<fogVertexDeclaration>
 void main() {
@@ -31,7 +32,8 @@ void main() {
   vec3 d = position - anchor; // плоская заготовка карточки: (u, v, 0)
   vec3 worldPos = anchor + right * d.x + vec3(0.0, 1.0, 0.0) * d.y;
   gl_Position = viewProjection * vec4(worldPos, 1.0);
-  vUV = uv;
+  // vFlip: канвас-атлас (v=0 — верх) и GPU-атлас RT (v=0 — низ кадра) — разные
+  vUV = vec2(uv.x, mix(uv.y, 1.0 - uv.y, vFlip));
 #ifdef FOG
   vFogDistance = (view * vec4(worldPos, 1.0)).xyz;
 #endif
@@ -39,11 +41,27 @@ void main() {
 `;
 BABYLON.Effect.ShadersStore["impostorFragmentShader"] = `
 uniform sampler2D map;
+uniform vec2 texSize;
 varying vec2 vUV;
 #include<fogFragmentDeclaration>
 void main() {
   vec4 color = texture2D(map, vUV);
   if (color.a < 0.5) discard;
+  // bleed-approx на GPU: у RT-атласа нет CPU-разлива цвета, прозрачные тексели
+  // (rgb=0) затемняют кромку при билинейной фильтрации — подмешиваем цвет
+  // соседа с бОльшей альфой
+  if (color.a < 0.95) {
+    vec2 o = 1.0 / texSize;
+    vec4 n1 = texture2D(map, vUV + vec2(o.x, 0.0));
+    vec4 n2 = texture2D(map, vUV - vec2(o.x, 0.0));
+    vec4 n3 = texture2D(map, vUV + vec2(0.0, o.y));
+    vec4 n4 = texture2D(map, vUV - vec2(0.0, o.y));
+    vec4 best = n1;
+    if (n2.a > best.a) best = n2;
+    if (n3.a > best.a) best = n3;
+    if (n4.a > best.a) best = n4;
+    color.rgb = mix(color.rgb, best.rgb, clamp((0.95 - color.a) * 3.0, 0.0, 1.0));
+  }
 #ifdef FOG
   color.rgb = mix(vFogColor, color.rgb, CalcFogFactor());
 #endif
@@ -52,21 +70,16 @@ void main() {
 }
 `;
 
-// Запекание НАСТОЯЩИХ 3D-деревьев/кустов в спрайты-импостеры:
+// Запекание НАСТОЯЩИХ 3D-деревьев/кустов в атлас-текстуры импостеров:
 // те же шаблоны геометрии и материалов, тот же свет сцены — совпадение идеальное.
-// Рендерим offscreen в RenderTargetTexture с прозрачным фоном, читаем пиксели,
-// складываем варианты в атлас. При любой ошибке — null (фолбэк на рисованные).
-function blitFlipped(ctx, px, w, h, dx, dy) {
-  const img = ctx.createImageData(w, h);
-  const row = w * 4;
-    for (let y = 0; y < h; y++)
-      img.data.set(px.subarray((h - 1 - y) * row, (h - y) * row), y * row);
-  ctx.putImageData(img, dx, dy);
-}
-// Alpha-bleed: растекание цвета в прозрачные тексели вокруг силуэта.
-// Без него билинейная фильтрация на дальней дистанции смешивает зелёный с ЧЁРНЫМ
-// (rgb=0 под a=0) и альфа-тест превращает край в чёрные точки. Альфа не трогаем —
-// после размывания такие тексели всё равно отбрасываются тестом.
+// GPU-путь: рендерим ВСЕ ВАРИАНТЫ В ОДИН КАДР — расставляем их по смещениям
+// так, чтобы каждое попало в СВОЮ ячейку атласа (ячейка = ширина карточки в
+// мире), и RT становится текстурой материала НАПРЯМУЮ. Никаких readPixels/
+// canvas/dataURL: чтение пикселей FBO сломано в headless (нулевой буфер даже
+// у рабочего фида), а bleed кромки делаем 4-тами в шейдере импостеров.
+// При любой ошибке — null (фолбэк на рисованные).
+// Alpha-bleed фолбэка (ниже) остался: разлив цвета в прозрачные тексели
+// против чёрной кромки при билинейной фильтрации.
 function bleedAlpha(ctx, w, h, passes = 3) {
   const img = ctx.getImageData(0, 0, w, h);
   const d = img.data;
@@ -95,109 +108,101 @@ function bleedAlpha(ctx, w, h, passes = 3) {
   }
   ctx.putImageData(img, 0, 0);
 }
-// Самопроверка запекания: непрозрачные пиксели в зоне КРОНЫ.
-// ВАЖНО: readPixels() отдаёт строки СНИЗУ вверх (OpenGL), поэтому крона —
-// это ВЕРХНИЕ строки буфера, а не нижние. Раньше проверяли низ (ствол) и пропускали
-// ячейки без листвы — теперь смотрим верхние 58% кадра.
-function countCanopy(px, w, h) {
-  const y0 = Math.floor(h * 0.42);
-  let n = 0;
-  for (let y = y0; y < h; y += 2) {
-    const base = y * w * 4;
-    for (let x = 3; x < w * 4; x += 32)
-      if (px[base + x] > 10) n++;
-  }
-  return n;
+// Ожидание n кадров: RTT рендерится движком ПОКА кадры идут (customRenderTargets)
+function waitFrames(n) {
+  return new Promise((res) => {
+    let c = 0;
+    const f = () => { if (++c >= n) return res(); requestAnimationFrame(f); };
+    requestAnimationFrame(f);
+  });
 }
-function bakeImpostorAtlas(st) {
+
+async function bakeImpostorAtlas(st) {
   const scene = st.scene;
   const SITE = new BABYLON.Vector3(2000, 0, 2000); // далеко от всего
   const bakedParts = [];
   try {
-    // --- деревья: атлас 3 варианта (по оттенкам листвы) ---
+    // --- деревья: 3 варианта в одном кадре 512x256 ---
+    // Камера dist 10, fovY .48, RT 512x256 (aspect 2): высота кадра 4.895м,
+    // ширина 9.79м = 4 ячейки по 2.447м, ось камеры — граница ячеек 1|2.
     const treeRT = new BABYLON.RenderTargetTexture("bakeTree",
-      { width: 128, height: 256 }, scene, false);
+      { width: 512, height: 256 }, scene, false);
     treeRT.clearColor = new BABYLON.Color4(0, 0, 0, 0);
     treeRT.hasAlpha = true;
-    // samplingMode у RenderTargetTexture только для чтения (геттер) — НЕ ставим.
-    // Он и не нужен: RT мы только читаем через readPixels, в текстуру не сэмплируем.
     const treeCam = new BABYLON.UniversalCamera("bakeTreeCam",
       SITE.add(new BABYLON.Vector3(0, 2.1, 10)), scene);
     treeCam.fov = 0.48;
     treeCam.minZ = 0.1; treeCam.maxZ = 50;
     treeCam.setTarget(SITE.add(new BABYLON.Vector3(0, 2.1, 0)));
     treeRT.activeCamera = treeCam;
-    // НЕ кладём RT в scene.customRenderTargets: рендерим сами через rtt.render()
-    // с явным renderList. Через scene.render() в кадр попадала вся сцена целиком
-    // (главная камера, другие RT) — часть вариантов теряла крону.
-    const treeCanvas = document.createElement("canvas");
-    treeCanvas.width = 512; treeCanvas.height = 256; // POT: 4 ячейки, используем 3
-    const tctx = treeCanvas.getContext("2d");
+    // Проекцию ФИКСИРУЕМ: иначе RTT рендерится с аспектом окна (1.78), а не
+    // своего RT (2.0), и содержимое ячеек атласа съезжает — карточки срезают
+    // кроны вертикально. Замороженная матрица гарантирует frame 9.79x4.895м.
+    treeCam.freezeProjectionMatrix(BABYLON.Matrix.PerspectiveFovLH(0.48, 2.0, 0.1, 50));
+    scene.customRenderTargets.push(treeRT);
+    const CELL_W = 2.447; // ширина ячейки атласа в мире (см. addTreeSprite)
     const LEAF_OFFS = [[0, 2.75, 0, 1.6], [0.1, 3.1, -0.1, 1.3], [-0.1, 3.45, 0.1, 1.0]];
+    const treeList = [];
     for (let v = 0; v < 3; v++) {
-      const parts = [];
-      const trunk = st.trunkTpl.createInstance("bt");
-      trunk.position.set(SITE.x, SITE.y + 1.3, SITE.z);
-      trunk.alwaysSelectAsActiveMesh = true; // мимо frustum-culling — точно в кадре
-      parts.push(trunk);
-      for (const [ox, oy, oz, d] of LEAF_OFFS) {
-        const leaf = st.leafTpls[v].createInstance("bl");
-        leaf.position.set(SITE.x + ox, SITE.y + oy, SITE.z + oz);
+      const cx = (-1.5 + v) * CELL_W; // центры ячеек 0,1,2 относительно оси камеры
+      // createInstance от ВЫКЛЮЧЕННОГО шаблона молча не рендерится в RTT —
+      // клоны с общей геометрией рендерятся
+      const trunk = st.trunkTpl.clone("bt" + v);
+      trunk.setEnabled(true);
+      trunk.position.set(SITE.x + cx, SITE.y + 1.3, SITE.z);
+      treeList.push(trunk);
+      bakedParts.push(trunk);
+      for (let i = 0; i < LEAF_OFFS.length; i++) {
+        const [ox, oy, oz, d] = LEAF_OFFS[i];
+        const leaf = st.leafTpls[v].clone(`bl${v}_${i}`);
+        leaf.setEnabled(true);
+        leaf.position.set(SITE.x + cx + ox, SITE.y + oy, SITE.z + oz);
         leaf.scaling.setAll(d);
-        leaf.alwaysSelectAsActiveMesh = true;
-        parts.push(leaf);
+        treeList.push(leaf);
+        bakedParts.push(leaf);
       }
-      bakedParts.push(...parts);
-      treeRT.renderList = parts; // в кадр только это дерево
-      treeRT.render();
-      treeRT.render(); // второй проход — матрицы/шейдеры точно осели
-      const px = treeRT.readPixels();
-      parts.forEach((p) => p.dispose());
-      if (!px) throw new Error("tree readPixels");
-      if (countCanopy(px, 128, 256) < 90) throw new Error("tree variant " + v + " no canopy");
-      blitFlipped(tctx, px, 128, 256, v * 128, 0);
     }
-    treeRT.renderList = null;
-    treeRT.dispose(); treeCam.dispose();
-    // --- кусты: атлас 2 варианта ---
+    treeRT.renderList = treeList;
+    await waitFrames(10); // шейдеры/матрицы/текстуры оседают в кадрах
+    // --- кусты: 2 варианта в одном кадре 256x128 (ячейка 2.211м) ---
     const bushRT = new BABYLON.RenderTargetTexture("bakeBush",
-      { width: 128, height: 128 }, scene, false);
+      { width: 256, height: 128 }, scene, false);
     bushRT.clearColor = new BABYLON.Color4(0, 0, 0, 0);
     bushRT.hasAlpha = true;
     const bushCam = new BABYLON.UniversalCamera("bakeBushCam",
       SITE.add(new BABYLON.Vector3(0, 0.45, 10)), scene);
-    bushCam.fov = 0.22; // кадр 1.2x1.1 с дистанции 10
+    bushCam.fov = 0.22;
     bushCam.minZ = 0.1; bushCam.maxZ = 50;
     bushCam.setTarget(SITE.add(new BABYLON.Vector3(0, 0.45, 0)));
     bushRT.activeCamera = bushCam;
-    const bushCanvas = document.createElement("canvas");
-    bushCanvas.width = 256; bushCanvas.height = 128;
-    const bctx = bushCanvas.getContext("2d");
+    bushCam.freezeProjectionMatrix(BABYLON.Matrix.PerspectiveFovLH(0.22, 2.0, 0.1, 50));
+    scene.customRenderTargets.push(bushRT);
+    const BC = 2.211; // ширина ячейки атласа кустов в мире
     const BUSH_OFFS = [[0, 0.4, 0, 0.8], [0.3, 0.3, 0.2, 0.6], [-0.3, 0.3, -0.15, 0.5]];
+    const bushList = [];
     for (let v = 0; v < 2; v++) {
-      const parts = [];
-      for (const [ox, oy, oz, d] of BUSH_OFFS) {
-        const b = st.leafTpls[v].createInstance("bb");
-        b.position.set(SITE.x + ox, SITE.y + oy, SITE.z + oz);
+      const cx = (-0.5 + v) * BC; // центры ячеек 0,1
+      for (let i = 0; i < BUSH_OFFS.length; i++) {
+        const [ox, oy, oz, d] = BUSH_OFFS[i];
+        const b = st.leafTpls[v].clone(`bb${v}_${i}`);
+        b.setEnabled(true);
+        b.position.set(SITE.x + cx + ox, SITE.y + oy, SITE.z + oz);
         b.scaling.setAll(d);
-        b.alwaysSelectAsActiveMesh = true;
-        parts.push(b);
+        bushList.push(b);
+        bakedParts.push(b);
       }
-      bakedParts.push(...parts);
-      bushRT.renderList = parts;
-      bushRT.render();
-      bushRT.render();
-      const px = bushRT.readPixels();
-      parts.forEach((p) => p.dispose());
-      if (!px) throw new Error("bush readPixels");
-      if (countCanopy(px, 128, 128) < 60) throw new Error("bush variant " + v + " blank");
-      blitFlipped(bctx, px, 128, 128, v * 128, 0);
     }
-    bushRT.renderList = null;
-    bushRT.dispose(); bushCam.dispose();
-    bleedAlpha(tctx, 512, 256);
-    bleedAlpha(bctx, 256, 128);
-    return { treeURL: treeCanvas.toDataURL("image/png"), bushURL: bushCanvas.toDataURL("image/png") };
+    bushRT.renderList = bushList;
+    await waitFrames(10);
+    // RT больше НЕ рендерим, но и НЕ диспозим — они теперь текстуры материала
+    for (const rt of [treeRT, bushRT]) {
+      rt.renderList = null;
+      const i = scene.customRenderTargets.indexOf(rt);
+      if (i >= 0) scene.customRenderTargets.splice(i, 1);
+    }
+    treeCam.dispose(); bushCam.dispose();
+    for (const p of bakedParts) p.dispose();
+    return { treeTex: treeRT, bushTex: bushRT };
   } catch (err) {
     for (const p of bakedParts) { try { p.dispose(); } catch { /* noop */ } }
     st.bakeError = String((err && err.message) || err);
@@ -265,17 +270,21 @@ function bushSpriteURL() {
 // Материал импостеров: как у SpriteManager — без мипов и без инверсии
 // (v=0 — верхняя строка картинки), туман сцены берём тот же, что у спрайтов.
 // Альфа-тест вместо блендинга: карточка пишет глубину и не требует сортировки.
-function makeImpostorMaterial(scene, name, url) {
+// vFlip=1 у GPU-атласа RT (v=0 — низ кадра), 0 у канвас-фолбэка (v=0 — верх).
+function makeImpostorMaterial(scene, name, url, texW, texH) {
   const fogOn = scene.fogEnabled && scene.fogMode !== BABYLON.Scene.FOGMODE_NONE;
   const m = new BABYLON.ShaderMaterial(name, scene,
     { vertex: "impostor", fragment: "impostor" }, {
       attributes: ["position", "uv", "anchor"],
-      uniforms: ["view", "viewProjection", "vFogInfos", "vFogColor"],
+      uniforms: ["view", "viewProjection", "vFlip", "texSize",
+        "vFogInfos", "vFogColor"],
       samplers: ["map"],
       defines: fogOn ? ["FOG"] : [],
     });
   m.setTexture("map",
     new BABYLON.Texture(url, scene, true, false, BABYLON.Texture.TRILINEAR_SAMPLINGMODE));
+  m.setFloat("vFlip", 0);
+  m.setVector2("texSize", new BABYLON.Vector2(texW, texH));
   if (fogOn) {
     m.setVector4("vFogInfos",
       new BABYLON.Vector4(scene.fogMode, scene.fogStart, scene.fogEnd, scene.fogDensity));
@@ -368,12 +377,32 @@ export function initTerrain(scene) {
     scene, mat, trunkTpl, leafTpls, chunks: new Map(), bakeError: null,
     treeCells: 3, bushCells: 2, treeCols: 4, bushCols: 2,
   };
-  const baked = bakeImpostorAtlas(st);
-  if (baked) { st.treeAtlasURL = baked.treeURL; st.bushAtlasURL = baked.bushURL; }
-  st.treeMat = makeImpostorMaterial(scene, "impostorTreeMat",
-    baked ? baked.treeURL : treeSpriteURL());
-  st.bushMat = makeImpostorMaterial(scene, "impostorBushMat",
-    baked ? baked.bushURL : bushSpriteURL());
+  // Стартово — рисованный фолбэк (держит чанки, что строятся ДО запекания).
+  st.treeMat = makeImpostorMaterial(scene, "impostorTreeMat", treeSpriteURL(), 512, 256);
+  st.bushMat = makeImpostorMaterial(scene, "impostorBushMat", bushSpriteURL(), 256, 128);
+  // Запекание — ПОСЛЕ готовности НУЖНЫХ ЕМУ текстур (кора/трава): в момент
+  // initTerrain jpg ещё в сети, материалы не готовы и RTT рендерит чёрный
+  // кадр — фолбэк оставался навсегда. Глобальный scene.isReady() в headless
+  // не резолвится, поэтому ждём именно требуемые текстуры, поллом с таймаутом.
+  // Материал общий: подмена texture+flip обновляет и уже построенные карточки.
+  let tries = 200; // ~20с
+  const poll = async () => {
+    if (tries-- > 0 && !(grassTex.isReady() && birchTex.isReady())) {
+      setTimeout(poll, 100);
+      return;
+    }
+    if (tries <= 0) { st.bakeError = "assets not ready"; return; }
+    try {
+      const baked = await bakeImpostorAtlas(st);
+      if (baked) {
+        st.treeMat.setTexture("map", baked.treeTex);
+        st.treeMat.setFloat("vFlip", 1);
+        st.bushMat.setTexture("map", baked.bushTex);
+        st.bushMat.setFloat("vFlip", 1);
+      }
+    } catch { /* bakeError уже записан, фолбэк остаётся */ }
+  };
+  poll();
   // Стартовые чанки вокруг спавна (0,-14) — сразу все, без поп-ина под меню
   updateTerrain(st, 0, -14);
   return st;
@@ -387,10 +416,10 @@ function chunkKey(cx, cz) { return cx + "," + cz; }
 // пустыми при любом повороте. Глубина224м — туман EXP2 0.008 к250м почти
 // непрозрачен, край сектора в дымке. FEED_RETAIN: чанки вокруг фида не
 // выгружаем, чтобы повороты туда-сюда не перестраивали их заново (~1мс на чанк).
-const CONE_DEPTH = 7;
+const CONE_DEPTH = 14; // 14x16=224м, как раньше при чанках 32м
 const CONE_HALF = 74 * Math.PI / 180; // 68.5° (полу-fov) + 5.5° запас на поворот
 const FEED_RETAIN = 8;
-const FEED_FULL_R = 1; // 3x3 вокруг фида — полное 3D-качество (как у игрока),
+const FEED_FULL_R = 2; // 3x3x16м=48м вокруг фида — полное 3D-качество (как у игрока),
 // иначе у фида вместо леса плоские спрайты-импостеры: wantFar раньше смотрел
 // только на игрока, и стоило отойти к монитору — лес у камеры схлопывался.
 const CHUNK_HALF_DIAG = (CHUNK_WORLD * Math.SQRT2) / 2;
@@ -404,6 +433,14 @@ export function updateTerrain(st, px, pz, ex, ez, efx, efz) {
   const ccx = Math.floor(px / CHUNK_WORLD), ccz = Math.floor(pz / CHUNK_WORLD);
   const want = new Set();
   const missing = [];
+  // Чанки 16м: far только ПОЗАДИ 3D-ядра игрока (3x3=48м) — на границе чанка
+  // рядом со спрайтом уже не окажешься, дерево-спрайт не стоит у самого носа.
+  // Дальше — спрайты (тот же лес по клеткам — позиции совпадают, подмена
+  // бесшовна), спрайты живут также в дальнем конусе камеры монитора.
+  const wantFarFor = (cx, cz) => {
+    const feedFull = hasFeed && Math.max(Math.abs(cx - fcx), Math.abs(cz - fcz)) <= FEED_FULL_R;
+    return Math.max(Math.abs(cx - ccx), Math.abs(cz - ccz)) > TREE_3D_R && !feedFull;
+  };
   const add = (cx, cz) => {
     const k = chunkKey(cx, cz);
     if (want.has(k)) return;
@@ -457,15 +494,11 @@ export function updateTerrain(st, px, pz, ex, ez, efx, efz) {
       if (near) continue; // удержание: конус свернул — чанки на своём месте
       disposeChunk(ch); st.chunks.delete(k); continue;
     }
-    // Чанк был построен дальним (спрайты), а игрок вошёл в него — перестроить
-    // в полном качестве (и наоборот). Полное качество — чанк игрока И кольцо
-    // вокруг активной камеры фида (FEED_FULL_R): иначе у фида вместо леса
-    // плоские спрайты-импостеры. Дальше колец — 2D-спрайты (жёсткая
-    // оптимизация: ~9x меньше инстансов).
+    // Чанк был спрайтовым, а теперь внутри кольца вида игрока или колец фида —
+    // перестроить в полном 3D (и наоборот). Спрайтами остаётся ТОЛЬКО дальний
+    // конус монитора за пределами кольца игрока.
     const [chx, chz] = k.split(",").map(Number);
-    const feedFull = hasFeed &&
-      Math.max(Math.abs(chx - fcx), Math.abs(chz - fcz)) <= FEED_FULL_R;
-    const wantFar = Math.max(Math.abs(chx - ccx), Math.abs(chz - ccz)) > 0 && !feedFull;
+    const wantFar = wantFarFor(chx, chz);
     if (ch.far !== wantFar) missing.push([chx, chz, 0]);
   }
   if (!missing.length) return;
@@ -473,10 +506,7 @@ export function updateTerrain(st, px, pz, ex, ez, efx, efz) {
   for (const [cx, cz] of missing) {
     const k = chunkKey(cx, cz);
     if (st.chunks.has(k)) { disposeChunk(st.chunks.get(k)); st.chunks.delete(k); }
-    const feedFull = hasFeed &&
-      Math.max(Math.abs(cx - fcx), Math.abs(cz - fcz)) <= FEED_FULL_R;
-    st.chunks.set(k, buildChunk(st, cx, cz,
-      Math.max(Math.abs(cx - ccx), Math.abs(cz - ccz)) > 0 && !feedFull));
+    st.chunks.set(k, buildChunk(st, cx, cz, wantFarFor(cx, cz)));
   }
 }
 
@@ -614,9 +644,16 @@ function cellRng(gx, gz, salt) {
 }
 
 function populateTrees(st, ch, ox, oz, far = false) {
-  const minCx = Math.floor(ox / TREE_SPACING), maxCx = Math.floor((ox + CHUNK_WORLD) / TREE_SPACING);
-  const minCz = Math.floor(oz / TREE_SPACING), maxCz = Math.floor((oz + CHUNK_WORLD) / TREE_SPACING);
-  const density = far ? TREE_DENSITY / 3 : TREE_DENSITY; // дальний лес реже
+  // Ячейка принадлежит ТОЛЬКО чанку, в котором lies его центр gx*SPACING:
+  // floor с обеих сторон границы давал дубли — на границе стояли и 3D-инстанс
+  // и спрайт одной и той же клетки (проблема «две версии дерева на одном месте»).
+  const minCx = Math.ceil(ox / TREE_SPACING - 1e-6);
+  const maxCx = Math.ceil((ox + CHUNK_WORLD) / TREE_SPACING - 1e-6) - 1;
+  const minCz = Math.ceil(oz / TREE_SPACING - 1e-6);
+  const maxCz = Math.ceil((oz + CHUNK_WORLD) / TREE_SPACING - 1e-6) - 1;
+  // ЕДИНАЯ плотность для 3D и спрайтов: спрайт-чанк должен быть ТЕМ ЖЕ лесом,
+  // что и 3D-версия, иначе пересборка чанка меняла количество деревьев на глазах
+  const density = TREE_DENSITY;
   for (let gz = minCz; gz <= maxCz; gz++) {
     for (let gx = minCx; gx <= maxCx; gx++) {
       const rng = cellRng(gx, gz, 1);
@@ -638,8 +675,11 @@ function populateTrees(st, ch, ox, oz, far = false) {
 }
 
 function populateBushes(st, ch, ox, oz, far = false) {
-  const minCx = Math.floor(ox / BUSH_SPACING), maxCx = Math.floor((ox + CHUNK_WORLD) / BUSH_SPACING);
-  const minCz = Math.floor(oz / BUSH_SPACING), maxCz = Math.floor((oz + CHUNK_WORLD) / BUSH_SPACING);
+  // Ячейка одного хозяина — как в populateTrees.
+  const minCx = Math.ceil(ox / BUSH_SPACING - 1e-6);
+  const maxCx = Math.ceil((ox + CHUNK_WORLD) / BUSH_SPACING - 1e-6) - 1;
+  const minCz = Math.ceil(oz / BUSH_SPACING - 1e-6);
+  const maxCz = Math.ceil((oz + CHUNK_WORLD) / BUSH_SPACING - 1e-6) - 1;
   for (let gz = minCz; gz <= maxCz; gz++) {
     for (let gx = minCx; gx <= maxCx; gx++) {
       const rng = cellRng(gx, gz, 2);
@@ -658,21 +698,25 @@ function populateBushes(st, ch, ox, oz, far = false) {
 
 // Импостеры: те же позиции/масштабы, что у 3D — переход незаметен.
 // cellIndex = запечённый вариант (тот же оттенок, что выбрало бы 3D).
+// Размер карточки = РАМКА запекающей камеры в метрах: деревья — дист.10,
+// fov 0.48 → высота 2*10*tan(0.24)=4.895, ширина * (128/256) = 2.447; рамка по y
+// = [-0.347, 4.547] (центр 2.1). Кусты — fov 0.22 → 2.211 обоих, y=[-0.656, 1.556].
+// Раньше 2.4x4.4/1.1x0.8 сжимали/уменьшали силуэт — «2D шире и меньше 3D».
 // Индекс берётся по модулю числа ячеек, поэтому даже при фолбэке атласа
 // карточка не вылезет за пределы текстуры (и не станет пустой).
 // Карточки копим на чанк, mesh'ы строит buildImpostorChunk. Жёсткого лимита
 // больше нет: дальних чанков всего 16 — ~400 деревьев и ~1900 кустов на лес.
 function addTreeSprite(st, ch, x, y, z, s, v) {
-  const h = 4.4 * s;
+  const h = 4.895 * s;
   ch.cards.tree.push({
-    x, z, y: y + 2.0 * s - h / 2, w: 2.4 * s, h,
+    x, z, y: y + 2.1 * s - h / 2, w: 2.447 * s, h,
     cell: ((v % st.treeCells) + st.treeCells) % st.treeCells,
   });
 }
 function addBushSprite(st, ch, x, y, z, s, v) {
-  const h = 0.8 * s;
+  const h = 2.211 * s;
   ch.cards.bush.push({
-    x, z, y: y + 0.35 * s - h / 2, w: 1.1 * s, h,
+    x, z, y: y + 0.45 * s - h / 2, w: 2.211 * s, h,
     cell: ((v % st.bushCells) + st.bushCells) % st.bushCells,
   });
 }
@@ -712,7 +756,12 @@ function buildImpostorChunk(st, ch) {
     mesh.setVerticesData("anchor", anchors, false, 3);
     mesh.setBoundingInfo(new BABYLON.BoundingInfo(min, max));
     mesh.material = kind === "tree" ? st.treeMat : st.bushMat;
-    mesh.isPickable = false;
+    // Пик ВКЛЮЧАЕМ: спрайты теперь начинаются в 16м от игрока — стрелы и
+    // установка камер должны ловить деревья и в дальних чанках. Коллизии
+    // (checkCollisions) НЕ включаем: плоская заготовка не совпадает с
+    // билбордом после шейдерного поворота — были бы невидимые стены.
+    mesh.isPickable = true;
+    mesh.metadata = { kind: kind === "tree" ? "tree" : "bush" };
     mesh.checkCollisions = false;
     mesh.freezeWorldMatrix();
     ch.sprites.push(mesh);

@@ -232,8 +232,8 @@ export function updateArrows(scene, dt, animals, glass, player) {
         const m = hit.pickedMesh;
         const kind = m.metadata?.kind;
         if (kind === "glass") breakGlass(scene, glass);
-        // Зверь ищется вверх по родителям: луч бьёт в дочерние меши .glb
-        // (у медведя их 10 и они торчат за хитбокс), а хитбокс — их корень
+        // Зверь ищется вверх по родителям: луч бьёт в дочерние меши .glb,
+        // а хитбокс — их корень
         let t = m, an = null;
         while (t && !an) {
           if (t.metadata?.kind === "animal") an = animals.find(x => x.mesh === t);
@@ -289,21 +289,21 @@ export function updateMeats(scene, dt, player, hud) {
   }
 }
 
-// ---------- Мобы: rabbit/fox/wolf/bear (h, speed, hp, dmg из animal.gd) ----------
+// ---------- Мобы: rabbit/fox/wolf (h, speed, hp, dmg из animal.gd) ----------
+// У лисы и волка 2 жизни: первая стрела застревает в звере, вторая добивает.
 export const KINDS = {
   rabbit: { h: 0.45, speed: 1.7, hp: 1, dmg: 0, color: new BABYLON.Color3(0.8, 0.75, 0.7) },
-  fox:    { h: 0.55, speed: 1.3, hp: 1, dmg: 8, color: new BABYLON.Color3(0.9, 0.45, 0.15) },
-  wolf:   { h: 0.7, speed: 1.1, hp: 1, dmg: 12, color: new BABYLON.Color3(0.4, 0.4, 0.45) },
-  bear:   { h: 0.95, speed: 0.7, hp: 2, dmg: 25, color: new BABYLON.Color3(0.3, 0.2, 0.12) },
+  fox:    { h: 0.55, speed: 1.3, hp: 2, dmg: 8, color: new BABYLON.Color3(0.9, 0.45, 0.15) },
+  wolf:   { h: 0.7, speed: 1.1, hp: 2, dmg: 12, color: new BABYLON.Color3(0.4, 0.4, 0.45) },
 };
 export const animals = [];
 // Поправка ориентации модели. glTF правосторонний, Babylon левосторонний —
 // лоадер зеркалит модели по Z (__root__.scaling.z = -1), поэтому нос из +Z
-// файла смотрит в -Z хитбокса. rabbit/fox/wolf в файле носом в +Z → доворот PI;
-// bear в файле носом в -Z → доворот 0. Без этого лиса/волк идут задом наперёд.
-const KIND_YAW = { rabbit: Math.PI, fox: Math.PI, wolf: Math.PI, bear: 0 };
+// файла смотрит в -Z хитбокса. Все звери в файле носом в +Z → доворот PI.
+// Без этого они идут задом наперёд.
+const KIND_YAW = { rabbit: Math.PI, fox: Math.PI, wolf: Math.PI };
 
-const MODEL_FILES = { rabbit: "rabbit.glb", fox: "fox.glb", wolf: "wolf.glb", bear: "bear.glb" };
+const MODEL_FILES = { rabbit: "rabbit.glb", fox: "fox.glb", wolf: "wolf.glb" };
 // Доводка ориентации для мешей Quaternius со скелетом (лиса/волк): их узлы дают
 // лишний поворот (AnimalArmature: -90° по X, __root__: 180° по Y), из-за чего
 // модель в файле (нос в +Z, верх в +Y) рендерится кувырком. Доворачиваем клон
@@ -344,93 +344,6 @@ function fixSkeletonRoots(scene, res) {
   }
 }
 
-// ---------- Медведь: процедурная low-poly модель вместо boxy bear.glb ----------
-// Стиль под Quaternius-зверей (лиса/волк): гранёные формы через
-// convertToFlatShadedMesh, нос в +Z (KIND_YAW.bear = 0). Ноги — пивоты,
-// качаются в procBearAnim (походка/дыхание/удар), скелета и клипов нет.
-function procBearPart(root, name, mk, mat, x, y, z, sx, sy, sz, parent) {
-  const m = mk(name);
-  m.material = mat;
-  m.position.set(x, y, z);
-  m.scaling.set(sx, sy, sz);
-  m.parent = parent || root;
-  m.isPickable = false; // бьём/стреляем в хитбокс (он pickable, части — нет)
-  m.convertToFlatShadedMesh();
-  return m;
-}
-function buildProcBear(scene, mesh, info) {
-  const root = new BABYLON.TransformNode("bearRoot", scene);
-  root.parent = mesh;
-  const baseY = -info.h / 2; // ступни на дне хитбокса
-  root.position.y = baseY;
-  root.scaling.setAll(0.8);
-  const fur = new BABYLON.StandardMaterial("bearFur", scene);
-  fur.diffuseColor = new BABYLON.Color3(0.30, 0.20, 0.12);
-  fur.specularColor = new BABYLON.Color3(0.04, 0.04, 0.04);
-  const dark = new BABYLON.StandardMaterial("bearDark", scene);
-  dark.diffuseColor = new BABYLON.Color3(0.20, 0.13, 0.08);
-  dark.specularColor = new BABYLON.Color3(0.04, 0.04, 0.04);
-  const tan = new BABYLON.StandardMaterial("bearTan", scene);
-  tan.diffuseColor = new BABYLON.Color3(0.48, 0.34, 0.20);
-  tan.specularColor = new BABYLON.Color3(0.04, 0.04, 0.04);
-  const noseM = new BABYLON.StandardMaterial("bearNose", scene);
-  noseM.diffuseColor = new BABYLON.Color3(0.07, 0.06, 0.05);
-  const sph = (n, d) => BABYLON.MeshBuilder.CreateSphere(n, { diameter: d, segments: 2 }, scene);
-  const box = (n, w, h, d) => BABYLON.MeshBuilder.CreateBox(n, { width: w, height: h, depth: d }, scene);
-  procBearPart(root, "bearBody", () => sph("bearBody", 0.62), fur, 0, 0.60, -0.05, 1, 0.92, 1.6);
-  procBearPart(root, "bearHump", () => sph("bearHump", 0.40), fur, 0, 0.80, 0.28, 1.05, 0.95, 1.1);
-  procBearPart(root, "bearRump", () => sph("bearRump", 0.44), fur, 0, 0.60, -0.42, 1, 0.95, 1.05);
-  const head = new BABYLON.TransformNode("bearHead", scene);
-  head.parent = root; head.position.set(0, 0.86, 0.55);
-  procBearPart(root, "bearSkull", () => sph("bearSkull", 0.34), fur, 0, 0, 0.06, 1, 0.95, 1.05, head);
-  procBearPart(root, "bearSnout", () => box("bearSnout", 0.18, 0.14, 0.22), tan, 0, -0.07, 0.26, 1, 1, 1, head);
-  procBearPart(root, "bearNose", () => box("bearNose", 0.09, 0.07, 0.06), noseM, 0, -0.03, 0.38, 1, 1, 1, head);
-  procBearPart(root, "bearEarL", () => sph("bearEarL", 0.11), dark, -0.14, 0.17, -0.02, 1, 1, 1, head);
-  procBearPart(root, "bearEarR", () => sph("bearEarR", 0.11), dark, 0.14, 0.17, -0.02, 1, 1, 1, head);
-  const leg = (n, x, z) => {
-    const piv = new BABYLON.TransformNode(n, scene);
-    piv.parent = root; piv.position.set(x, 0.50, z);
-    const cyl = BABYLON.MeshBuilder.CreateCylinder(n + "M", { height: 0.52, diameterTop: 0.11, diameterBottom: 0.15, tessellation: 6 }, scene);
-    procBearPart(root, n + "M", () => cyl, dark, 0, -0.22, 0, 1, 1, 1, piv);
-    procBearPart(root, n + "Paw", () => box(n + "Paw", 0.16, 0.10, 0.22), dark, 0, -0.45, 0.04, 1, 1, 1, piv);
-    return piv;
-  };
-  const proc = { root, baseY, head,
-    legFL: leg("bearLegFL", -0.20, 0.30), legFR: leg("bearLegFR", 0.20, 0.30),
-    legBL: leg("bearLegBL", -0.21, -0.38), legBR: leg("bearLegBR", 0.21, -0.38) };
-  procBearPart(root, "bearTail", () => sph("bearTail", 0.12), dark, 0, 0.66, -0.62, 1, 1, 1, root);
-  return proc;
-}
-// Походка (диагональные пары), дыхание в покое, удар — встаёт на дыбы и бьёт.
-function procBearAnim(an, dt, moving, atkT) {
-  const P = an.proc;
-  an.st.step = (an.st.step || 0) + dt * (moving ? 3 + an.info.speed * 2.2 : 0.6);
-  const s = Math.sin(an.st.step * 2.2);
-  const ease = (o, v) => { o.rotation.x += (v - o.rotation.x) * Math.min(1, dt * 10); };
-  if (atkT >= 0) {
-    const k = Math.sin(Math.min(1, atkT) * Math.PI);
-    P.root.rotation.x = -0.5 * k;
-    P.head.rotation.x = -0.35 * k;
-    P.legFL.rotation.x = -1.1 * k; P.legFR.rotation.x = -1.1 * k;
-    P.legBL.rotation.x = 0.35 * k; P.legBR.rotation.x = 0.35 * k;
-    P.root.position.y = P.baseY;
-  } else if (moving) {
-    P.root.rotation.x = 0;
-    P.head.rotation.x = 0.05 * s; P.head.rotation.y = 0;
-    P.legFL.rotation.x = 0.55 * s; P.legBR.rotation.x = 0.55 * s;
-    P.legFR.rotation.x = -0.55 * s; P.legBL.rotation.x = -0.55 * s;
-    P.root.position.y = P.baseY + Math.abs(Math.cos(an.st.step * 2.2)) * 0.025;
-  } else {
-    P.root.rotation.x = 0;
-    an.st.breath = (an.st.breath || 0) + dt;
-    const b = Math.sin(an.st.breath * 2.2);
-    ease(P.legFL, 0); ease(P.legFR, 0); ease(P.legBL, 0); ease(P.legBR, 0);
-    P.head.rotation.x = 0.03 * b;
-    P.head.rotation.y = 0.18 * Math.sin(an.st.breath * 0.45);
-    P.root.position.y = P.baseY + 0.008 * b;
-  }
-}
-
 export async function spawnAnimal(scene, kind, pos) {
   const info = KINDS[kind];
   const mesh = BABYLON.MeshBuilder.CreateBox(`an_${kind}`, { width: 0.8, height: Math.max(info.h, 0.3), depth: 1.2 }, scene);
@@ -445,12 +358,6 @@ export async function spawnAnimal(scene, kind, pos) {
   const an = { mesh, hitbox: mesh, kind, info, hp: info.hp, st: { dead: false, deathAge: 0, spawnAge: 0,
     wanderTarget: null, wanderT: 0, attackCd: 0, attackT: 0, forcedAggro: false, groundT: 0 }, disposed: false };
   // Пытаемся заменить бокс на .glb (не критично если нет).
-  // Медведь — процедурный (boxy bear.glb не в стиле Quaternius-зверей).
-  if (kind === "bear") {
-    mesh.material.alpha = 0; // скрыть бокс, оставить коллизию
-    an.walkAG = an.restAG = an.attackAG = null;
-    an.proc = buildProcBear(scene, mesh, info);
-  } else
   try {
     const res = await BABYLON.SceneLoader.ImportMeshAsync("", MODELS_BASE(), MODEL_FILES[kind], scene);
     fixSkeletonRoots(scene, res);
@@ -473,7 +380,17 @@ export async function spawnAnimal(scene, kind, pos) {
       const s = info.h / sizeY;
       glb.scaling.setAll(s);
       glb.parent = mesh;
-      glb.position.y = -bb.min.y * s - info.h / 2;
+      // Ступни — по РЕАЛЬНОМУ минимуму вершин модели (не по bb скелета:
+      // у скиновых мешей Babylon отдаёт смещённые границы). getVerticesData
+      // возвращает исходные (нескиненные) позиции — минимум стабилен.
+      let mnY = Infinity;
+      for (const m of glb.getChildMeshes()) {
+        const pd = m.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+        if (!pd) continue;
+        for (let i = 1; i < pd.length; i += 3) if (pd[i] < mnY) mnY = pd[i];
+      }
+      if (!isFinite(mnY)) mnY = bb.min.y;
+      glb.position.y = -mnY * s - info.h / 2;
       mesh.material.alpha = 0; // скрыть бокс, оставить коллизию
       mesh.material = mesh.material;
       an.glb = glb;
@@ -580,21 +497,18 @@ export function updateAnimals(scene, dt, player, hud) {
     } else {
       // охотник: кролик <24м, иначе игрок (<16м или forced)
       let target = null, best = 24;
-      if (!(an.kind === "bear" && !an.st.forcedAggro)) {
-        for (const o of animals) {
-          if (o.kind !== "rabbit" || o.st.dead) continue;
-          const d = Math.hypot(p.x - o.mesh.position.x, p.z - o.mesh.position.z);
-          if (d < best) { best = d; target = o.mesh.position; }
-        }
+      for (const o of animals) {
+        if (o.kind !== "rabbit" || o.st.dead) continue;
+        const d = Math.hypot(p.x - o.mesh.position.x, p.z - o.mesh.position.z);
+        if (d < best) { best = d; target = o.mesh.position; }
       }
       const wantPlayer = an.st.forcedAggro || distP < 16;
-      if (!target && wantPlayer && !(an.kind === "bear" && !an.st.forcedAggro)) target = pp;
-      else if (!target && an.kind === "bear") target = null;
+      if (!target && wantPlayer) target = pp;
       if (target) {
         const d = Math.hypot(p.x - target.x, p.z - target.z);
-        const mult = an.kind === "bear" ? 1.3 : 2.5;
-        // Медведь крупнее: бьёт с 1.35м (встаёт на дыбы), мелочь — с 1.1м
-        const atkR = an.kind === "bear" ? 1.35 : 1.1;
+        const mult = 2.5;
+        // Лиса и волк бьют с 1.1м
+        const atkR = 1.1;
         if (d > atkR) { dir = new BABYLON.Vector3(target.x - p.x, 0, target.z - p.z).normalize(); spd = an.info.speed * mult; }
         else {
           // Вплотную к цели: стоим, атакуем и доворачиваемся на неё (а не бродим)
@@ -631,9 +545,7 @@ export function updateAnimals(scene, dt, player, hud) {
     // в окно атаки (0.38с) — клип attack/bite, если есть у модели
     const moving = !!dir;
     const attacking = an.st.attackT > 0;
-    if (an.proc) {
-      procBearAnim(an, dt, moving, attacking ? Math.min(1, an.st.attackT / 0.38) : -1);
-    } else if (attacking && an.attackAG) {
+    if (attacking && an.attackAG) {
       if (!an.attackAG.isPlaying) {
         an.walkAG?.stop(); an.restAG?.stop();
         an.attackAG.start(false);
@@ -651,8 +563,10 @@ export function updateAnimals(scene, dt, player, hud) {
         if (!want.isPlaying) want.start(true);
       }
       an.st.moving = moving;
-      if (moving && an.walkAG?.isPlaying)
+      if (moving && an.walkAG?.isPlaying) {
+        // Множитель как в animal.gd: походка модели ~1c на цикл.
         an.walkAG.speedRatio = Math.min(6, Math.max(0.3, spd * 6));
+      }
     }
     // Ноды, которые не драйвит ни один играющий клип — в bind. Клипы покрывают
     // разные наборы (Walk: IK-ноги/спина/хвост/уши; атака: Torso3), и без этого
@@ -677,14 +591,14 @@ export function updateAnimals(scene, dt, player, hud) {
       // Выпад ВПЕРЁД строго на цель (а не по rotation.y: в нём сидит KIND_YAW
       // доворот модели и доворот ещё догоняет цель — лису/волка тащило мимо,
       // клип pounce вперёд, тело вбок: ноги гребли по воздуху). Дальше —
-      // кламп, чтобы не влететь в цель (медведь проходил сквозь игрока).
+      // кламп, чтобы не влететь в цель.
       const lunge = Math.sin(Math.min(1, t) * Math.PI) * 0.7 * an.info.h;
       const tgt = an.st.attackTarget;
       const tpx = tgt === pp ? pp.x : tgt.x, tpz = tgt === pp ? pp.z : tgt.z;
       const lyaw = Math.atan2(tpx - p.x, tpz - p.z);
       p.x += Math.sin(lyaw) * lunge * dt * 3;
       p.z += Math.cos(lyaw) * lunge * dt * 3;
-      const mind = an.kind === "bear" ? 1.15 : 0.85;
+      const mind = 0.85;
       const ddx = p.x - tpx, ddz = p.z - tpz;
       const dd = Math.hypot(ddx, ddz);
       if (dd < mind && dd > 1e-6) { p.x = tpx + ddx / dd * mind; p.z = tpz + ddz / dd * mind; }
@@ -699,10 +613,9 @@ export function updateAnimals(scene, dt, player, hud) {
 
 export function pickKind() {
   const r = Math.random();
-  if (r < 0.30) return "rabbit";
-  if (r < 0.58) return "fox";
-  if (r < 0.82) return "wolf";
-  return "bear";
+  if (r < 0.35) return "rabbit";
+  if (r < 0.67) return "fox";
+  return "wolf";
 }
 
 // ---------- Камеры наблюдения: установка на деревья (E), монитор, C/X, M, стрелка ----------

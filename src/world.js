@@ -328,6 +328,9 @@ export function buildCampfire(scene) {
   flame.material = flameMat;
   flame.billboardMode = BABYLON.Mesh.BILLBOARDMODE_Y;
   flame.position.y = 0.34;
+  // ОБЯЗАТЕЛЬНО спарентить: без parent конус пламени остаётся в мировом
+  // нуле (0,0.34,0) — «оранжевый конус рядом с домом», а на костре его нет.
+  flame.parent = root;
   flame.isPickable = false;
   cf.flame = flame;
 
