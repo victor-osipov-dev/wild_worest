@@ -4,7 +4,7 @@
 // Всё через InstancedMesh + общие материалы (иначе Out of Memory).
 // getHeight() из noise.js — единый источник высоты для игрока и мобов.
 import * as BABYLON from "@babylonjs/core";
-import { getHeight, cellHash, rand01, HOUSE_POS } from "./noise.js";
+import { getHeight, cellHash, rand01, HOUSE_POS, PIT_CENTER, PIT_R, PIT_EDGE } from "./noise.js";
 import { asset } from "./assets.js";
 
 export const TILE = 2.0, CHUNK_TILES = 8, CHUNK_WORLD = 16, VIEW_RADIUS = 4, TREE_3D_R = 1;
@@ -429,7 +429,9 @@ const CHUNK_HALF_DIAG = (CHUNK_WORLD * Math.SQRT2) / 2;
 // конусом вдоль её взгляда (efx, efz), выгрузка дальних. Строим ВСЁ
 // недостающее сразу (как _reload_chunks в Godot): бюджет по 2 давал
 // дыры без земли на границах — игрок проваливался. Постройка чанка ~1мс.
-export function updateTerrain(st, px, pz, ex, ez, efx, efz) {
+// playerRadius: радиус кольца вокруг игрока. В режиме монитора игрок стоит
+// на месте — можно грузить 5x5 вместо 9x9. Кольцо/конус фида не зависят от него.
+export function updateTerrain(st, px, pz, ex, ez, efx, efz, playerRadius = VIEW_RADIUS) {
   const ccx = Math.floor(px / CHUNK_WORLD), ccz = Math.floor(pz / CHUNK_WORLD);
   const want = new Set();
   const missing = [];
@@ -450,17 +452,17 @@ export function updateTerrain(st, px, pz, ex, ez, efx, efz) {
       missing.push([cx, cz, rx * rx + rz * rz]); // ближе к игроку — строим раньше
     }
   };
-  const ring = (ecx, ecz) => {
-    for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++)
-      for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++)
+  const ring = (ecx, ecz, radius) => {
+    for (let dx = -radius; dx <= radius; dx++)
+      for (let dz = -radius; dz <= radius; dz++)
         add(ecx + dx, ecz + dz);
   };
-  ring(ccx, ccz);
+  ring(ccx, ccz, playerRadius);
   const hasFeed = ex !== null && ex !== undefined;
   let fcx = 0, fcz = 0;
   if (hasFeed) {
     fcx = Math.floor(ex / CHUNK_WORLD); fcz = Math.floor(ez / CHUNK_WORLD);
-    ring(fcx, fcz);
+    ring(fcx, fcz, VIEW_RADIUS); // камеру монитора не трогаем — как было 9x9
     const fl = Math.hypot(efx, efz);
     if (fl > 1e-6) {
       const fx = efx / fl, fz = efz / fl;
@@ -518,11 +520,18 @@ function disposeChunk(ch) {
 
 function buildChunk(st, cx, cz, far = false) {
   const { scene } = st;
+  const cxw = cx * CHUNK_WORLD, czw = cz * CHUNK_WORLD;
+  // У ямы сетка 2м грубее самого склона (край шириной 1м): меш показывал
+  // пологий визуальный наклон там, где getHeight() ещё равен нулю, — игрок
+  // «не реагировал» на яму и проваливался сквозь неё. У чанков рядом с воронкой
+  // уплотняем сетку до 0.5м, чтобы меш совпадал с аналитической высотой.
+  const nearPit = Math.hypot(cxw + CHUNK_WORLD / 2 - PIT_CENTER.x,
+    czw + CHUNK_WORLD / 2 - PIT_CENTER.z) < PIT_R + PIT_EDGE + CHUNK_WORLD;
+  const divisions = nearPit ? 32 : CHUNK_TILES;
   // CreateGround даёт гарантированно правильный winding (+Y),
   // затем сдвигаем вершины по getHeight() и пересчитываем нормали.
   const ground = BABYLON.MeshBuilder.CreateGround(`chunk_${cx}_${cz}`,
-    { width: CHUNK_WORLD, height: CHUNK_WORLD, subdivisions: CHUNK_TILES }, scene);
-  const cxw = cx * CHUNK_WORLD, czw = cz * CHUNK_WORLD;
+    { width: CHUNK_WORLD, height: CHUNK_WORLD, subdivisions: divisions }, scene);
   ground.position.set(cxw, 0, czw);
   const pos = ground.getVerticesData(BABYLON.VertexBuffer.PositionKind);
   const uv = ground.getVerticesData(BABYLON.VertexBuffer.UVKind);
@@ -541,7 +550,10 @@ function buildChunk(st, cx, cz, far = false) {
   ground.setVerticesData(BABYLON.VertexBuffer.NormalKind, normals, true);
   ground.refreshBoundingInfo();
   ground.material = st.mat;
-  ground.checkCollisions = true;
+  // Земля больше не участвует в moveWithCollisions: высоту игрока задаёт
+  // getHeight() в updatePlayer. Иначе эллипсоид застревает на крутых склонах
+  // воронки. isPickable остаётся — стрелы и лучи по-прежнему попадают в землю.
+  ground.checkCollisions = false;
   ground.isPickable = true;
   ground.metadata = { kind: "terrain" };
   ground.freezeWorldMatrix();

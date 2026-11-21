@@ -4,6 +4,10 @@ import { getHeight } from "./noise.js";
 import { breakGlass } from "./world.js";
 import { MODELS_BASE } from "./assets.js";
 
+const _down = new BABYLON.Vector3(0, -1, 0);
+const MAX_WALK_SLOPE = 2.0;  // ~63°: круче — уже стена воронки, вверх не пускаем
+const SLOPE_SAMPLE = 0.35;   // шаг конечной разности для градиента getHeight
+
 // ---------- Игрок: SPEED 5, JUMP 4.5, мышь 0.002, HP 100 ----------
 export function createPlayer(scene, camera) {
   const mesh = BABYLON.MeshBuilder.CreateCapsule("Player", { radius: 0.35, height: 1.15 }, scene);
@@ -34,39 +38,75 @@ export function updatePlayer(scene, player, camera, input, dt, frozen) {
   if (input.l) move.subtractInPlace(r);
   if (input.r) move.addInPlace(r);
   if (move.lengthSquared() > 0) move.normalize().scaleInPlace(SPEED * dt);
-  // Горизонталь и вертикаль раздельными шагами — иначе на склоне отталкивает.
-  // В покое (стоим, без ввода) вертикаль не гоняем: мелкий шаг гравитации
-  // выталкивался коллизией вбок по нормали склона — отсюда медленное сползание.
+  // Градиент рельефа нужен и для запрета подъёма, и чтобы не дать встать
+  // на слишком крутой склон (стенку воронки).
+  // Важно: в воздухе склон не трогает траекторию прыжка — проверки работают
+  // только когда игрок стоит на земле.
+  let gx = 0, gz = 0, slope2 = 0;
+  if (mesh.position.y > -30 && st.grounded) {
+    const x = mesh.position.x, z = mesh.position.z;
+    gx = (getHeight(x + SLOPE_SAMPLE, z) - getHeight(x - SLOPE_SAMPLE, z)) / (2 * SLOPE_SAMPLE);
+    gz = (getHeight(x, z + SLOPE_SAMPLE) - getHeight(x, z - SLOPE_SAMPLE)) / (2 * SLOPE_SAMPLE);
+    slope2 = gx * gx + gz * gz;
+    if (slope2 > MAX_WALK_SLOPE * MAX_WALK_SLOPE && move.lengthSquared() > 0) {
+      const uphill = gx * move.x + gz * move.z;
+      if (uphill > 0) {
+        const k = uphill / slope2;
+        move.x -= gx * k;
+        move.z -= gz * k;
+      }
+    }
+  }
+  const steep = slope2 > MAX_WALK_SLOPE * MAX_WALK_SLOPE;
+  // НОВЫЙ СПОСОБ: земля НЕ участвует в коллизиях. Горизонтальным движением
+  // занимается moveWithCollisions (только стены дома и стволы), а высоту мы
+  // берём напрямую из getHeight() — той же функции, по которой строится меш.
+  // Раньше эллипсоид упирался в крутой склон воронки и застревал на кромке.
   mesh.moveWithCollisions(move);
-  const resting = st.grounded && st.vel.y <= 0 && move.lengthSquared() === 0;
-  if (!resting) {
+
+  if (input.jump && st.grounded) { st.vel.y = 4.5; st.grounded = false; input.jump = false; }
+
+  if (mesh.position.y > -30) {
+    // Над поверхностью: кинематическое следование рельефу, без инерции и скольжения.
+    let groundY = getHeight(mesh.position.x, mesh.position.z);
+    // Пол дома лежит выше аналитической земли — учитываем его отдельным лучом.
+    const houseRay = new BABYLON.Ray(mesh.position, _down, 1.5);
+    const houseHit = scene.pickWithRay(houseRay, (m) => m.isPickable !== false && m.isEnabled()
+      && m.metadata?.kind === "house");
+    if (houseHit?.pickedMesh && houseHit.pickedPoint.y > groundY) groundY = houseHit.pickedPoint.y;
+    const targetY = groundY + 0.6;
+    if (steep) {
+      // Стенка воронки: стоять нельзя. Соскальзываем вниз, но не «приклеиваемся»
+      // к земле за кадр: ограничение скорости спуска убирает телепорт на дно.
+      const inv = 1 / Math.sqrt(slope2);
+      const slide = 2.5 * dt;
+      mesh.position.x -= gx * inv * slide;
+      mesh.position.z -= gz * inv * slide;
+      const gy = getHeight(mesh.position.x, mesh.position.z) + 0.6;
+      mesh.position.y = Math.max(gy, mesh.position.y - 4.5 * dt);
+      st.vel.y = 0;
+      st.grounded = false;
+    } else if (!st.grounded) {
+      // В ВОЗДУХЕ: полная баллистика и вверх, и вниз. Раньше ветка шла по
+      // vel.y > 0 — в апогее (vel.y <= 0) игрока мгновенно приклеивало к земле.
+      st.vel.y = Math.max(MAXFALL, st.vel.y - GRAV * dt);
+      mesh.position.y += st.vel.y * dt;
+      if (mesh.position.y <= targetY) { mesh.position.y = targetY; st.vel.y = 0; st.grounded = true; }
+    } else {
+      // Ходьба: стоим на рельефе без инерции. Но если земля ушла вниз резко
+      // (кромка воронки/ямы), не телепортируемся за ней, а отпускаем в падение.
+      if (mesh.position.y - targetY > 0.18) {
+        st.grounded = false; // на следующем кадре включится баллистика
+      } else {
+        mesh.position.y = targetY;
+        st.vel.y = 0;
+      }
+    }
+  } else {
+    // Пещера: там свой пол и стены, высота берётся коллизиями как раньше.
     st.vel.y = Math.max(MAXFALL, st.vel.y - GRAV * dt);
     mesh.moveWithCollisions(new BABYLON.Vector3(0, st.vel.y * dt, 0));
-  } else {
-    st.vel.y = 0;
-  }
-  // Земля: короткий луч вниз = низ эллипсоида (0.6) + скин 0.08.
-  // Длинный луч (0.8) срабатывал почти сразу после прыжка (~1м) и гасил падение.
-  const ray = new BABYLON.Ray(mesh.position, new BABYLON.Vector3(0, -1, 0), 0.68);
-  const hit = scene.pickWithRay(ray, (m) => m.isPickable !== false && m.isEnabled()
-    && (m.metadata?.kind === "terrain" || m.metadata?.kind === "house"));
-  st.grounded = !!hit?.pickedMesh;
-  if (st.grounded && st.vel.y <= 0) {
-    // Стоим: гравитацию не копим, иначе коллизия и падение дерутся каждый кадр
-    // и камера дрожит. Точный покой на точке контакта.
-    st.vel.y = 0;
-    const target = hit.pickedPoint.y + 0.6;
-    // Дельта ограничена: по склону/лестнице прилипаем, а в воронку ямы падаем свободно
-    if (Math.abs(target - mesh.position.y) < 0.35) mesh.position.y = target;
-  }
-  if (input.jump && st.grounded) { st.vel.y = 4.5; st.grounded = false; input.jump = false; }
-  // Страховка от дыр стриминга: провалились глубоко под analytic-поверхность —
-  // вернуть на неё (в пещере y<-30 не трогаем, там свой пол)
-  if (mesh.position.y > -30) {
-    const gy = getHeight(mesh.position.x, mesh.position.z);
-    if (mesh.position.y < gy - 3) {
-      mesh.position.y = gy + 0.6; st.vel.y = 0; st.grounded = true;
-    }
+    if (mesh.position.y < -59.4) { mesh.position.y = -59.4; st.vel.y = 0; st.grounded = true; }
   }
   camera.position.set(mesh.position.x, mesh.position.y + 0.45, mesh.position.z);
   camera.rotation.set(st.pitch, st.yaw, 0);
@@ -122,6 +162,28 @@ function bowMat(scene, r, g, b, rough) {
   void rough;
   return m;
 }
+
+// Перья: три тонкие заострённые лопасти вокруг хвоста древка. Родитель — древко,
+// поэтому они одинаково выглядят на натянутой стреле и в полёте.
+function fletchMat(scene, color) {
+  const m = new BABYLON.StandardMaterial("fletchMat", scene);
+  m.diffuseColor = color;
+  m.emissiveColor = color.scale(0.18); // заметные на фоне леса
+  m.specularColor = new BABYLON.Color3(0.05, 0.05, 0.05);
+  return m;
+}
+function addFletching(scene, shaft, mat, forBow) {
+  for (let i = 0; i < 3; i++) {
+    const f = BABYLON.MeshBuilder.CreateSphere("fletch", { diameter: 1, segments: 6 }, scene);
+    f.material = mat;
+    f.parent = shaft;
+    f.position.set(0, 0, -0.26); // хвост древка (depth 0.68 → конец -0.34)
+    f.rotation.z = i * Math.PI * 2 / 3;
+    f.scaling.set(0.005, 0.07, 0.10); // тонкая пластинка, вытянутая вдоль стрелы
+    f.isPickable = false;
+    if (forBow) { f.layerMask = 0x2; f.metadata = { kind: "bow" }; }
+  }
+}
 export function createBow(scene, camera) {
   const root = new BABYLON.TransformNode("Bow", scene);
   const wood = bowMat(scene, 0.42, 0.25, 0.1);
@@ -151,6 +213,8 @@ export function createBow(scene, camera) {
   headM.specularColor = new BABYLON.Color3(0.6, 0.6, 0.6); // metallic 0.6 в оригинале
   head.material = headM; head.parent = nocked;
   head.layerMask = 0x2; head.metadata = { kind: "bow" }; head.isPickable = false;
+  // Та же оперка, что и у вылетевшей стрелы — натянутая и летящая стрелы теперь совпадают.
+  addFletching(scene, shaft, fletchMat(scene, new BABYLON.Color3(0.85, 0.18, 0.1)), true);
   root.parent = camera;
   root.position.set(0.25, -0.15, 0.4); // впереди камеры (в Godot -0.4, т.к. там вперёд -Z)
   return { root, limbs, strings, grip, tips, nocked, shaft, head, drawing: false, timer: 0 };
@@ -159,6 +223,12 @@ export function createBow(scene, camera) {
 export function updateBow(bow, dt) {
   if (bow.drawing) bow.timer = Math.min(1.2, bow.timer + dt);
   else bow.timer = Math.max(0, bow.timer - dt * 10);
+  // В покое лук не меняется: не пересчитываем 15 сегментов и десятки Vector3
+  // каждый кадр. Учитываем и флаг натяжения (мгновенный выстрел при timer=0).
+  if (bow.lastTimer !== undefined
+    && Math.abs(bow.timer - bow.lastTimer) < 1e-4 && bow.drawing === bow.lastDrawing) return;
+  bow.lastTimer = bow.timer;
+  bow.lastDrawing = bow.drawing;
   const t = bow.timer / 1.2;
   const bend = IDLE_BEND + (DRAW_BEND - IDLE_BEND) * t;
   const pull = PULL_BASE + (PULL_MAX - PULL_BASE) * t;
@@ -182,15 +252,29 @@ export function shootArrow(scene, camera, power) {
   const t = Math.min(1, power / 1.2);
   const speed = 6 + (25 - 6) * t * t;
   const grav = 1.2 * (1 - t);
-  const mesh = BABYLON.MeshBuilder.CreateBox("arrow", { width: 0.03, height: 0.03, depth: 0.8 }, scene);
-  const m = new BABYLON.StandardMaterial("arrowMat", scene);
-  m.diffuseColor = new BABYLON.Color3(0.5, 0.35, 0.2);
-  mesh.material = m;
+  // Та же геометрия и материалы, что у стрелы на луке: тонкое древко и металлический
+  // наконечник. Заметность дают только перья, а не утолщённый ствол.
+  const mesh = BABYLON.MeshBuilder.CreateBox("arrow", { width: 0.018, height: 0.018, depth: 0.68 }, scene);
+  mesh.material = bowMat(scene, 0.55, 0.35, 0.15);
+  const head = BABYLON.MeshBuilder.CreateBox("arrowHead", { width: 0.034, height: 0.034, depth: 0.1 }, scene);
+  const headM = bowMat(scene, 0.3, 0.3, 0.35);
+  headM.specularColor = new BABYLON.Color3(0.6, 0.6, 0.6);
+  head.material = headM; head.parent = mesh; head.position.z = 0.29; head.isPickable = false;
+  addFletching(scene, mesh, fletchMat(scene, new BABYLON.Color3(0.85, 0.18, 0.1)), false);
   const dir = camera.getDirection(new BABYLON.Vector3(0, 0, 1));
   mesh.position = camera.position.add(dir.scale(0.6));
   mesh.lookAt(mesh.position.add(dir));
   mesh.metadata = { kind: "arrow" };
   arrows.push({ mesh, vel: dir.scale(speed), grav, stuck: null, stuckOffset: null, stopped: false, age: 0 });
+}
+
+// Стрела отлипает от носителя (смерть зверя, разбитое стекло) и падает.
+function dropArrow(a, vel) {
+  a.stuck = null;
+  a.grav = 1.0;
+  a.stopped = false;
+  a.vel.copyFrom(vel ||
+    new BABYLON.Vector3((Math.random() - 0.5) * 1.2, 0.8 + Math.random() * 0.6, (Math.random() - 0.5) * 1.2));
 }
 
 export function updateArrows(scene, dt, animals, glass, player) {
@@ -201,10 +285,7 @@ export function updateArrows(scene, dt, animals, glass, player) {
       if (host.disposed || host.st.dead) {
         // Как _drop() в оригинале: отлипнуть, вернуть нормальную гравитацию и упасть.
         // Без сброса grav стрела с полной натяжки (grav≈0) улетала в небо навсегда.
-        a.stuck = null;
-        a.grav = 1.0;
-        a.stopped = false;
-        a.vel.set((Math.random() - 0.5) * 1.2, 0.8 + Math.random() * 0.6, (Math.random() - 0.5) * 1.2);
+        dropArrow(a);
       } else {
         // Смещение и направление — в ЛОКАЛЬНЫХ осях носителя: стрела крутится вместе с ним
         a.mesh.position.copyFrom(BABYLON.Vector3.TransformCoordinates(a.stuckLocalPos, host.mesh.getWorldMatrix()));
@@ -220,43 +301,77 @@ export function updateArrows(scene, dt, animals, glass, player) {
       }
       continue;
     }
-      a.vel.y -= 9.8 * a.grav * dt;
-      const step = a.vel.scale(dt);
-      const ray = new BABYLON.Ray(a.mesh.position, a.vel.normalizeToNew(), step.length() + 0.1);
-      const hit = scene.pickWithRay(ray, (m) => m.isPickable !== false && m.isEnabled()
-        && m.name !== "arrow" && m.metadata?.kind !== "player" && m.metadata?.kind !== "bow");
-      a.mesh.position.addInPlace(step);
-      if (a.vel.lengthSquared() > 0.09)
-        a.mesh.lookAt(a.mesh.position.add(a.vel.normalizeToNew()));
-      if (hit?.pickedMesh) {
-        const m = hit.pickedMesh;
-        const kind = m.metadata?.kind;
-        if (kind === "glass") breakGlass(scene, glass);
-        // Зверь ищется вверх по родителям: луч бьёт в дочерние меши .glb,
-        // а хитбокс — их корень
-        let t = m, an = null;
-        while (t && !an) {
-          if (t.metadata?.kind === "animal") an = animals.find(x => x.mesh === t);
-          t = t.parent;
-        }
-        if (an) {
-          damageAnimal(scene, an, 1.0);
-          // Запоминаем точку и направление в локальных осях зверя
-          const inv = an.mesh.getWorldMatrix().clone();
-          inv.invert();
-          a.stuck = an;
-          a.stuckLocalPos = BABYLON.Vector3.TransformCoordinates(a.mesh.position, inv);
-          const wdir = a.vel.lengthSquared() > 0.001
-            ? a.vel.normalizeToNew() : new BABYLON.Vector3(0, 0, 1);
-          a.stuckLocalDir = BABYLON.Vector3.TransformNormal(wdir, inv);
-          continue;
-        }
-        a.stopped = true;
+
+    a.vel.y -= 9.8 * a.grav * dt;
+    const dir = a.vel.normalizeToNew();
+    const stepLen = a.vel.length() * dt;
+    const start = a.mesh.position.clone();
+    const ray = new BABYLON.Ray(start, dir, Math.max(0.001, stepLen));
+    const hit = scene.pickWithRay(ray, (m) => m.isPickable !== false && m.isEnabled()
+      && m.name !== "arrow" && m.name !== "arrowHead" && m.name !== "fletch"
+      && m.name !== "shard"
+      && m.metadata?.kind !== "player" && m.metadata?.kind !== "bow");
+
+    // Стоп ровно в точке контакта. Раньше стрела сначала делала ПОЛНЫЙ шаг
+    // (до 1.25м на полной натяжке), а потом только проверяла попадание —
+    // из-за этого она «проскальзывала» и дёргалась к месту падения.
+    let travel = stepLen;
+    let groundHit = false;
+    if (hit?.pickedMesh && hit.distance <= stepLen + 0.001) {
+      travel = Math.max(0, Math.min(stepLen, hit.distance - 0.01));
+    }
+    // Аналитическая земля: чанки могут быть не подгружены, а луч по ним не попал.
+    const g0 = getHeight(start.x, start.z);
+    const g1 = getHeight(start.x + dir.x * stepLen, start.z + dir.z * stepLen);
+    if (start.y > g0 + 0.02) {
+      const f0 = start.y - g0;
+      const f1 = start.y + dir.y * stepLen - g1;
+      if (f1 <= 0 && f0 > 0) {
+        const tg = Math.max(0, Math.min(stepLen, f0 / (f0 - f1) * stepLen));
+        if (tg < travel) { travel = tg; groundHit = true; }
       }
-      const g = getHeight(a.mesh.position.x, a.mesh.position.z);
-      if (a.mesh.position.y < g) { a.stopped = true; a.mesh.position.y = g + 0.05; }
-      a.age += dt;
-      if (a.age > 30) { a.mesh.dispose(); arrows.splice(i, 1); }
+    }
+    const impact = start.add(dir.scale(travel));
+    a.mesh.position.copyFrom(impact);
+    if (a.vel.lengthSquared() > 0.09) a.mesh.lookAt(impact.add(dir));
+
+    if (groundHit) {
+      a.mesh.position.y = getHeight(impact.x, impact.z) + 0.04;
+      a.stopped = true;
+    } else if (hit?.pickedMesh && hit.distance <= stepLen + 0.001) {
+      const m = hit.pickedMesh;
+      const kind = m.metadata?.kind;
+      if (kind === "glass") {
+        breakGlass(scene, glass);
+        // Разбитое стекло больше не держит стрелу — она падает на землю.
+        dropArrow(a, new BABYLON.Vector3((Math.random() - 0.5) * 0.6, -0.2, (Math.random() - 0.5) * 0.6));
+        a.age += dt;
+        continue;
+      }
+      // Зверь ищется вверх по родителям: луч бьёт в дочерние меши .glb,
+      // а хитбокс — их корень
+      let t = m, an = null;
+      while (t && !an) {
+        if (t.metadata?.kind === "animal") an = animals.find(x => x.mesh === t);
+        t = t.parent;
+      }
+      if (an) {
+        damageAnimal(scene, an, 1.0);
+        // Запоминаем точку и направление в локальных осях зверя
+        const inv = an.mesh.getWorldMatrix().clone();
+        inv.invert();
+        a.stuck = an;
+        a.stuckLocalPos = BABYLON.Vector3.TransformCoordinates(a.mesh.position, inv);
+        a.stuckLocalDir = BABYLON.Vector3.TransformNormal(dir, inv);
+        a.age += dt;
+        continue;
+      }
+      a.stopped = true;
+    }
+    const g = getHeight(a.mesh.position.x, a.mesh.position.z);
+    if (a.mesh.position.y < g) { a.mesh.position.y = g + 0.04; a.stopped = true; }
+    a.age += dt;
+    if (a.age > 30) { a.mesh.dispose(); arrows.splice(i, 1); }
   }
 }
 

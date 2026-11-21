@@ -145,8 +145,10 @@ export function buildHouse(scene) {
   const glassMesh = BABYLON.MeshBuilder.CreateBox("WinGlass", { width: 0.02, height: 0.55, depth: 1.0 }, scene);
   glassMesh.position = new BABYLON.Vector3(HOUSE.x - 2.31, 1.775, HOUSE.z);
   const glassMat = new BABYLON.StandardMaterial("glassMat", scene);
-  glassMat.diffuseColor = new BABYLON.Color3(0.7, 0.85, 1.0);
-  glassMat.alpha = 0.25;
+  glassMat.diffuseColor = new BABYLON.Color3(0.62, 0.8, 0.98);
+  glassMat.emissiveColor = new BABYLON.Color3(0.08, 0.12, 0.16);
+  glassMat.specularColor = new BABYLON.Color3(0.7, 0.8, 0.9);
+  glassMat.alpha = 0.55; // 0.25 было почти не видно — окно читалось как дыра
   glassMesh.material = glassMat;
   glassMesh.metadata = { kind: "glass" };
   const glass = { mesh: glassMesh, broken: false };
@@ -190,7 +192,7 @@ export function buildHouse(scene) {
   const hemi = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0, 1, 0), scene);
   hemi.intensity = 0.55;
 
-  return { root, door, glass, screen, screenMat };
+  return { root, door, glass, screen, screenMat, lamp };
 }
 
 export function updateDoor(door, playerPos, dt) {
@@ -334,13 +336,14 @@ export function buildCampfire(scene) {
   flame.isPickable = false;
   cf.flame = flame;
 
-  // Прозрачный хитбокс, чтобы тыкать костёр было легко (кирпичи/брёвна тоже pickable)
-  const hit = BABYLON.MeshBuilder.CreateBox("cfHit", { width: 1.35, height: 1.25, depth: 1.35 }, scene);
+  // Прозрачный хитбокс только у самого огня: раньше он был высотой 1.25м
+  // и срабатывал, когда целишься в дым над костром.
+  const hit = BABYLON.MeshBuilder.CreateBox("cfHit", { width: 1.0, height: 0.45, depth: 1.0 }, scene);
   const hitMat = new BABYLON.StandardMaterial("cfHitMat", scene);
   hitMat.alpha = 0; // не виден, но участвует в raycast (isVisible=false ломает pick)
   hitMat.disableDepthWrite = true;
   hit.material = hitMat;
-  hit.position.y = 0.58;
+  hit.position.y = 0.22;
   hit.parent = root;
   pickable(hit);
 
@@ -366,6 +369,7 @@ export function buildCampfire(scene) {
   // Огонь и дым рисуем обычным альфа-блендингом, свет даёт PointLight + свечение конуса.
   fire.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
   fire.start();
+  cf.fire = fire; // останавливаем, когда игрок далеко
 
   // Дым: серый, медленно поднимается и раздувается
   const smoke = new BABYLON.ParticleSystem("cfSmoke", 120, scene);
@@ -386,6 +390,7 @@ export function buildCampfire(scene) {
   smoke.gravity = new BABYLON.Vector3(0, 0.25, 0);
   smoke.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD; // не ONEONE (см. выше)
   smoke.start();
+  cf.smoke = smoke;
 
   // Свет костра
   const light = new BABYLON.PointLight("cfLight", new BABYLON.Vector3(x, y + 0.7, z), scene);
@@ -440,36 +445,47 @@ export function campfireInteract(cf, player, hud, toast) {
 export function buildPit(scene) {
   const root = new BABYLON.TransformNode("Pit", scene);
   root.position = new BABYLON.Vector3(PIT_CENTER.x, 0, PIT_CENTER.z);
-  const rockTex = new BABYLON.Texture(asset("assets/textures/rock_diff.jpg"), scene);
-  const rockMat = new BABYLON.StandardMaterial("rockMat", scene);
-  rockMat.diffuseTexture = rockTex;
-  rockMat.diffuseColor = new BABYLON.Color3(0.17, 0.17, 0.16);
-  rockMat.specularColor = new BABYLON.Color3(0, 0, 0);
-
-  // Кольца-торы убраны: воронка уже есть в самом рельефе (getHeight),
-  // а торы торчали чёрными арками над землёй.
-  // шипы на дне
-  let seed = 1337;
-  const rnd = () => (seed = (seed * 1664525 + 1013904223) | 0, ((seed >>> 0) / 4294967295));
-  for (let i = 0; i < 8; i++) {
-    const ang = rnd() * Math.PI * 2, rad = 0.2 + rnd() * 1.5, h = 1.2 + rnd() * 1.4;
-    const spike = BABYLON.MeshBuilder.CreateCylinder(`spike${i}`,
-      { height: h, diameterTop: 0.06, diameterBottom: 0.24 + rnd() * 0.36 }, scene);
-    spike.position = new BABYLON.Vector3(PIT_CENTER.x + Math.cos(ang) * rad, -13.4 + h * 0.5, PIT_CENTER.z + Math.sin(ang) * rad);
-    spike.material = rockMat;
-  }
+  // Ни торы, ни шипы, ни внутренняя облицовка больше не нужны: воронка
+  // целиком задана рельефом getHeight(), а меш у ямы уплотнён до 0.5м.
   const glow = new BABYLON.PointLight("PitGlow", new BABYLON.Vector3(PIT_CENTER.x, -11, PIT_CENTER.z), scene);
-  glow.diffuse = new BABYLON.Color3(0.55, 0.12, 0.7); glow.intensity = 8; glow.range = 7;
+  glow.diffuse = new BABYLON.Color3(0.35, 0.08, 0.45); glow.intensity = 3; glow.range = 6;
   const glow2 = new BABYLON.PointLight("PitGlowDeep", new BABYLON.Vector3(PIT_CENTER.x, -13.2, PIT_CENTER.z), scene);
-  glow2.diffuse = new BABYLON.Color3(0.75, 0.15, 0.12); glow2.intensity = 5; glow2.range = 4.5;
+  glow2.diffuse = new BABYLON.Color3(0.45, 0.1, 0.08); glow2.intensity = 2; glow2.range = 4;
+
+  // Статичный дымчатый туман, шире воронки. Три горизонтальных пояса:
+  // сверху редко и мелко, книзу всё гуще и крупнее. manualEmitCount рождает
+  // частицы один раз, время жизни огромное, движения нет — картинка не мерцает.
+  const fogTex = blobTexture(scene, "pitFogTex");
+  const fogBand = (name, yMin, yMax, count, alpha, sizeMin, sizeMax) => {
+    const sys = new BABYLON.ParticleSystem("pitFog_" + name, count, scene);
+    sys.particleTexture = fogTex;
+    sys.emitter = new BABYLON.Vector3(PIT_CENTER.x, 0, PIT_CENTER.z);
+    sys.minEmitBox = new BABYLON.Vector3(-3.8, yMin, -3.8);
+    sys.maxEmitBox = new BABYLON.Vector3(3.8, yMax, 3.8);
+    sys.color1 = new BABYLON.Color4(0.025, 0.025, 0.03, alpha);
+    sys.color2 = new BABYLON.Color4(0.05, 0.045, 0.06, alpha * 0.7);
+    sys.minSize = sizeMin; sys.maxSize = sizeMax;
+    sys.minLifeTime = 1e6; sys.maxLifeTime = 1e6;
+    sys.emitRate = 0;
+    sys.manualEmitCount = count;
+    sys.direction1 = BABYLON.Vector3.Zero();
+    sys.direction2 = BABYLON.Vector3.Zero();
+    sys.minEmitPower = 0; sys.maxEmitPower = 0;
+    sys.gravity = BABYLON.Vector3.Zero();
+    sys.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
+    sys.start();
+  };
+  fogBand("top", -4.5, -0.8, 40, 0.22, 1.2, 2.4);
+  fogBand("mid", -9.0, -4.5, 95, 0.38, 1.7, 3.3);
+  fogBand("bottom", -13.0, -9.0, 145, 0.55, 2.1, 4.0);
 
   // Восходящие миазмы: 30 частиц, жизнь 4с, скорость 0..1.6 вверх
   const ps = new BABYLON.ParticleSystem("motes", 30, scene);
   ps.emitter = new BABYLON.Vector3(PIT_CENTER.x, 0.4, PIT_CENTER.z);
   ps.minEmitBox = new BABYLON.Vector3(-1, 0, -1);
   ps.maxEmitBox = new BABYLON.Vector3(1, 0, 1);
-  ps.color1 = new BABYLON.Color4(0.7, 0.3, 1.0, 0.85);
-  ps.color2 = new BABYLON.Color4(0.6, 0.2, 0.9, 0.4);
+  ps.color1 = new BABYLON.Color4(0.35, 0.12, 0.45, 0.4);
+  ps.color2 = new BABYLON.Color4(0.3, 0.1, 0.4, 0.2);
   ps.minSize = 0.06; ps.maxSize = 0.2;
   ps.minLifeTime = 3; ps.maxLifeTime = 4;
   ps.emitRate = 8;
@@ -481,7 +497,7 @@ export function buildPit(scene) {
 
   // Триггер-цилиндр (KillTrigger r2.8 h8 на y-6)
   const trigger = new BABYLON.Vector3(PIT_CENTER.x, -6, PIT_CENTER.z);
-  return { root, trigger, triggerR: 2.8, triggerH: 8 };
+  return { root, trigger, triggerR: 2.8, triggerH: 8, glow, glow2, motes: ps };
 }
 
 // --- Пещера 20x8x20 в стороне (y=-60), выход назад ---
@@ -509,5 +525,5 @@ export function buildCave(scene) {
   const mm = new BABYLON.StandardMaterial("exitMat", scene);
   mm.emissiveColor = new BABYLON.Color3(0.1, 0.9, 0.3);
   marker.material = mm;
-  return { exitPos, spawnPos: new BABYLON.Vector3(0, CY + 1.2, 7), CY };
+  return { exitPos, spawnPos: new BABYLON.Vector3(0, CY + 1.2, 7), CY, torch };
 }
