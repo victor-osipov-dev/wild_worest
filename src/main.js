@@ -7,9 +7,12 @@ import { buildHouse, updateDoor, buildPit, buildCave, breakGlass,
   buildCampfire, updateCampfire, campfireInteract, COOK_TIME } from "./world.js";
 import { createPlayer, updatePlayer, damagePlayer, createBow, updateBow, shootArrow,
   updateArrows, arrows, spawnMeat, updateMeats, spawnAnimal, updateAnimals, animals,
-  pickKind, createCamManager, registerCamera, removeCamera, meats, damageAnimal } from "./entities.js";
+  pickKind, createCamManager, registerCamera, removeCamera, meats, damageAnimal,
+  updateResins, resins } from "./entities.js";
 import { getHeight } from "./noise.js";
 import { createTestScenes } from "./testScenes.js";
+import { createStory } from "./story.js";
+import { createMine } from "./mine.js";
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, true);
@@ -115,7 +118,8 @@ window.addEventListener("error", (e) => {
   b.textContent = "ERR: " + (e.message || e.error);
 });
 function hud() {
-  $("stats").innerHTML = `Здоровье: ${Math.ceil(player.st.hp)}<br>Мясо: ${player.st.meat}`;
+  $("stats").innerHTML = `Здоровье: ${Math.ceil(player.st.hp)}<br>Мясо: ${player.st.meat}`
+    + (player.st.resin ? "<br>Смола: есть" : "");
   $("camCount").textContent = `Камеры: ${mgr.list.length} / 5`;
 }
 hud();
@@ -238,12 +242,15 @@ canvas.addEventListener("pointerdown", (e) => {
     campfireInteract(campfire, player, hud, toast);
     return;
   }
-  // подбор стрелы взглядом (луч 8м, mask 4)
-  const ray = camera.getForwardRay(8);
-  const hit = scene.pickWithRay(ray, (m) => m.name === "arrow");
-  if (hit?.pickedMesh) {
-    const i = arrows.findIndex(a => a.mesh === hit.pickedMesh && a.stopped);
-    if (i >= 0) { arrows[i].mesh.dispose(); arrows.splice(i, 1); return; }
+  // подбор стрелы взглядом (луч 8м, mask 4). В шахте подбирать нечего:
+  // клик должен уходить в лук, а не тратиться на стрелу у метки.
+  if (!(mine && mine.active)) {
+    const ray = camera.getForwardRay(8);
+    const hit = scene.pickWithRay(ray, (m) => m.name === "arrow");
+    if (hit?.pickedMesh) {
+      const i = arrows.findIndex(a => a.mesh === hit.pickedMesh && a.stopped);
+      if (i >= 0) { arrows[i].mesh.dispose(); arrows.splice(i, 1); return; }
+    }
   }
   bow.drawing = true; bow.timer = 0;
 });
@@ -290,6 +297,9 @@ function rayFromCam(dist, pred) {
 }
 function onInteract() {
   if (mgr.monitorActive) return;
+  // Сюжет: стрела со смолой у остатков камеры / расплавить решётку.
+  if (story && story.tryPoke()) return;
+  if (story && story.tryMelt()) return;
   // Как в Godot (_input менеджера раньше _unhandled_input игрока): монитор в приоритете.
   // 1) монитор (5м, LOOK_RANGE) — только если есть камеры
   for (let i = mgr.list.length - 1; i >= 0; i--)
@@ -374,6 +384,37 @@ function setScreenOn() {
   screenMat.emissiveColor = new BABYLON.Color3(1, 1, 1);
   screenMat.diffuseColor = new BABYLON.Color3(0.15, 0.15, 0.15);
 }
+// «Камера не работает»: тёмно-зелёный фон, шумовые строки и надпись.
+let brokenTex = null, brokenT = 0;
+function drawBrokenFeed() {
+  if (!brokenTex) {
+    brokenTex = new BABYLON.DynamicTexture("feedBroken",
+      { width: 256, height: 144 }, scene, false);
+    brokenTex.wrapU = brokenTex.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
+  }
+  const g = brokenTex.getContext();
+  g.fillStyle = "#06120a";
+  g.fillRect(0, 0, 256, 144);
+  for (let i = 0; i < 36; i++) {
+    const y = Math.random() * 144;
+    g.fillStyle = `rgba(${30 + Math.random() * 60 | 0},${140 + Math.random() * 100 | 0},${30 + Math.random() * 50 | 0},${0.12 + Math.random() * 0.4})`;
+    g.fillRect(0, y, 256, 1 + Math.random() * 3);
+  }
+  g.fillStyle = "rgba(190,255,160,.92)";
+  g.font = "bold 20px monospace";
+  g.textAlign = "center";
+  g.fillText("НЕТ СИГНАЛА", 128, 78);
+  brokenTex.update();
+}
+function setScreenBroken() {
+  if (mgr.screenMode === "broken") return;
+  mgr.screenMode = "broken";
+  drawBrokenFeed();
+  screenMat.emissiveTexture = brokenTex;
+  screenMat.diffuseTexture = brokenTex;
+  screenMat.emissiveColor = new BABYLON.Color3(0.75, 1, 0.75);
+  screenMat.diffuseColor = new BABYLON.Color3(0.1, 0.14, 0.1);
+}
 // Есть камеры, но мы не в мониторе: экран светится, приглашая нажать E.
 function setScreenReady() {
   if (mgr.screenMode === "ready") return;
@@ -437,13 +478,24 @@ const testScenes = new URLSearchParams(location.search).has("scene")
     })
   : null;
 
-// ---------- стартовые мобы леса (как forest_wildlife: сразу несколько) ----------
-if (!testScenes) {
-  for (let i = 0; i < 4; i++) {
-    const a = 2 + i * 1.5, r = 20 + i * 4;
-    const x = Math.cos(a) * r, z = Math.sin(a) * r - 10;
-    spawnAnimal(scene, ["rabbit", "fox", "wolf"][i % 3], new BABYLON.Vector3(x, getHeight(x, z) + 0.5, z));
-  }
+// ---------- сюжет «Последний день в лесу» ----------
+// В тестовых сценах сюжет не включается — там изолированные механики.
+const story = testScenes ? null : createStory({ scene, camera, player, mgr, hud, toast, buildCamera, terrain, screen });
+// Мини-игра в шахте: после падения в яму игрок оказывается в вагонетке.
+// В тестовых сценах не создаётся — там остаётся старая изолированная пещера.
+const mine = testScenes ? null : createMine({
+  scene, camera, player, toast,
+  onFinish: () => { if (story) story.finishMine(); },
+});
+if (story) {
+  // Здоровье не полное: мясо и костёр становятся необходимыми, а не декором.
+  player.st.hp = 55;
+  hud();
+  // Рядом с домом: кролики на еду и хищники, которые реально опасны.
+  spawnAnimal(scene, "rabbit", new BABYLON.Vector3(-13, getHeight(-13, -13) + 0.5, -13));
+  spawnAnimal(scene, "rabbit", new BABYLON.Vector3(-4, getHeight(-4, -17) + 0.5, -17));
+  spawnAnimal(scene, "fox", new BABYLON.Vector3(9, getHeight(9, -14) + 0.5, -14));
+  spawnAnimal(scene, "wolf", new BABYLON.Vector3(-16, getHeight(-16, 3) + 0.5, 3));
 }
 
 // ---------- цикл ----------
@@ -472,12 +524,18 @@ engine.runRenderLoop(() => {
   }
   const activeCam = mgr.list[mgr.active];
   let feedDir = null;
+  const camBroken = !!(story && story.feedBroken && activeCam && story.feedBroken(activeCam));
   if (!activeCam || activeCam.isDisposed()) {
     // Камер нет — экран чёрный, texтура и RT не нужны.
     if (mgr.active !== -1) { mgr.active = -1; mgr.yaw = 0; mgr.pitch = 0; }
     if (mgr.marked !== -1 && !mgr.list[mgr.marked]) mgr.marked = -1;
     setScreenStandby();
     setFeedEnabled(false);
+  } else if (mgr.monitorActive && camBroken) {
+    // Камеру разъело кислотой: вместо леса — шум и «НЕТ СИГНАЛА».
+    setScreenBroken();
+    setFeedEnabled(false);
+    $("camLabel").textContent = `Камера ${mgr.active + 1} — нет сигнала`;
   } else if (mgr.monitorActive) {
     // Фид существует только внутри режима монитора.
     setScreenOn();
@@ -498,12 +556,18 @@ engine.runRenderLoop(() => {
     const p = 0.7 + 0.3 * Math.sin(now * 0.006); // медленная пульсация «смотри сюда»
     screenMat.emissiveColor.set(0.9 * p, 0.95 * p, p);
   }
+  // Шум «нет сигнала» перерисовываем редко — экран читается как сломанный.
+  if (mgr.screenMode === "broken") {
+    brokenT += raw;
+    if (brokenT >= 0.12) { brokenT = 0; drawBrokenFeed(); }
+  }
   // Земля грузится вокруг игрока, вокруг активной камеры монитора и конусом
   // вдоль её взгляда: без второго центра в кадре фида дыры, а дальше кольца
   // ±80м по направлению камеры — пустота (виден clearColor сцены).
   // Пересчитываем зоны только при реальном изменении: иначе каждый кадр
   // перебирались ~150 чанков и заново строился Set/конус даже когда всё стоит.
   const pp = player.mesh.position;
+  let inMine = !!(mine && mine.active);
   const q = (v, s) => Math.round(v / s);
   const feedSig = feedDir
     ? `f${q(feedCam.position.x, 1)},${q(feedCam.position.z, 1)},${q(feedDir.x, 0.02)},${q(feedDir.z, 0.02)}`
@@ -511,7 +575,7 @@ engine.runRenderLoop(() => {
   const terrainSig = `p${Math.floor(pp.x / CHUNK_WORLD)},${Math.floor(pp.z / CHUNK_WORLD)}`
     + `|${q(pp.x, 4)},${q(pp.z, 4)}|${q(player.st.yaw, 0.05)},${q(player.st.pitch, 0.05)}`
     + `|${feedSig}|${mgr.monitorActive ? 2 : 4}`;
-  if (terrainSig !== terrainKey) {
+  if (!inMine && terrainSig !== terrainKey) {
     terrainKey = terrainSig;
     updateTerrain(terrain, pp.x, pp.z,
       feedDir ? feedCam.position.x : null, feedDir ? feedCam.position.z : null,
@@ -531,7 +595,8 @@ engine.runRenderLoop(() => {
         `fps ${engine.getFps().toFixed(0)} | pos ${player.mesh.position.x.toFixed(1)},${player.mesh.position.y.toFixed(1)},${player.mesh.position.z.toFixed(1)} | chunks ${vis}/${tot} | animals ${animals.length} | arrows ${arrows.length} | grounded ${player.st.grounded} | bake ${terrain.treeAtlasURL ? "RT-OK" : "FALLBACK " + (terrain.bakeError || "")}`;
     }
   }
-  updatePlayer(scene, player, camera, input, dt, mgr.monitorActive);
+  player.st.pitBlocked = !!(story && story.grateIntact);
+  if (!inMine) updatePlayer(scene, player, camera, input, dt, mgr.monitorActive);
   pushOutOfTrees(terrain, player.mesh.position);
   updateDoor(door, player.mesh.position, dt);
   // _update_looking каждый кадр (луч 5м до монитора) + хинты как в _update_hud
@@ -559,6 +624,8 @@ engine.runRenderLoop(() => {
     camAimDisc.setEnabled(true);
   } else camAimDisc.setEnabled(false);
   if (mgr.monitorActive) $("hint").textContent = "";
+  else if (story && story.pokeHint()) $("hint").textContent = "E — поковырять слизь стрелой";
+  else if (story && story.grateHint()) $("hint").textContent = "E — расплавить решётку смолой";
   else if (lookingAtMonitor && mgr.list.length) $("hint").textContent = "E — посмотреть камеры";
   else if (lookingAtCampfire) {
     $("hint").textContent = campfire.phase === "cooking"
@@ -579,15 +646,24 @@ engine.runRenderLoop(() => {
   setLight(campfire.light, nearFire);
   setLight(pit.glow, nearPit);
   setLight(pit.glow2, nearPit);
-  setLight(cave.torch, inCave || pp.y < -30);
+  setLight(cave.torch, inCave);
+  if (mine) setLight(mine.light, inMine);
   setParticles(campfire.fire, nearFire);
   setParticles(campfire.smoke, nearFire);
   setParticles(pit.motes, nearPit);
 
   updateBow(bow, dt);
   updateArrows(scene, dt, animals, glass, player);
+  if (mine) {
+    inMine = mine.active;
+    if (inMine) mine.update(dt);
+    inMine = mine.active;
+    if (inMine) $("hint").textContent = mine.hint;
+  }
   updateMeats(scene, dt, player, hud);
+  updateResins(scene, dt, player, toast);
   updateAnimals(scene, dt, player, hud);
+  if (story) story.update(dt);
   updateCampfire(campfire, raw);
   if (campfire.readyFlash) { campfire.readyFlash = false; toast("Жареное мясо готово — тыкни по костру"); }
 
@@ -640,36 +716,56 @@ engine.runRenderLoop(() => {
   }
 
   if (mgr.toastT > 0) { mgr.toastT -= dt; if (mgr.toastT <= 0) $("toast").style.display = "none"; }
-  // стрелка на метку
+  // Указатель цели: только «левее / правее». Длина стрелки показывает,
+  // насколько сильно нужно повернуться; почти по центру — указатель скрыт.
   const nav = $("navArrow");
-  if (mgr.marked >= 0 && mgr.list[mgr.marked] && !mgr.monitorActive) {
-    const mp = mgr.list[mgr.marked].position;
-    const to = mp.subtract(camera.position);
-    const fwd = camera.getDirection(new BABYLON.Vector3(0, 0, 1));
-    const right = camera.getDirection(new BABYLON.Vector3(1, 0, 0));
-    const v = BABYLON.Vector3.Project(mp, BABYLON.Matrix.Identity(), scene.getTransformMatrix(), camera.viewport.toGlobal(engine.getRenderWidth(), engine.getRenderHeight()));
-    // Проекция точки за спиной даёт инвертированные экранные координаты —
-    // отсюда ранний разворот стрелки. «На экране» только если цель впереди.
-    const inFront = BABYLON.Vector3.Dot(to, fwd) > 0;
-    if (inFront && v.z < 1 && v.x > 60 && v.x < innerWidth - 60 && v.y > 60 && v.y < innerHeight - 60) {
-      nav.style.display = "block"; nav.style.left = (v.x - 24) + "px"; nav.style.top = (v.y - 60) + "px";
-      nav.style.transform = "rotate(0deg)";
-    } else {
-      // Угол в локальных осях камеры: 0 — прямо перед собой, ±π — за спиной.
-      const angle = Math.atan2(BABYLON.Vector3.Dot(to, right), BABYLON.Vector3.Dot(to, fwd));
-      nav.style.display = "block";
-      nav.style.left = "calc(50% - 24px)";
-      nav.style.top = "120px";
-      nav.style.transform = `rotate(${angle}rad)`;
-    }
-  } else nav.style.display = "none";
+  const navShape = $("navArrowShape");
+  const mark = $("targetMark");
+  const storyTarget = story ? story.navTarget() : null;
+  const markedCam = mgr.marked >= 0 ? mgr.list[mgr.marked] : null;
+  const navTarget = storyTarget || (markedCam ? markedCam.position : null);
+  if (navTarget && !mgr.monitorActive && !inMine) {
+    const to = navTarget.subtract(camera.position); to.y = 0;
+    const fwd = camera.getDirection(new BABYLON.Vector3(0, 0, 1)); fwd.y = 0;
+    const right = camera.getDirection(new BABYLON.Vector3(1, 0, 0)); right.y = 0;
+    if (to.lengthSquared() > 1e-4 && fwd.lengthSquared() > 1e-4) {
+      to.normalize(); fwd.normalize(); right.normalize();
+      // atan2(<вправо>, <вперёд>): минус — цель слева, плюс — справа.
+      const angle = Math.atan2(BABYLON.Vector3.Dot(to, right),
+        BABYLON.Vector3.Dot(to, fwd));
+      const abs = Math.abs(angle);
+      if (abs < 0.12) {
+        nav.style.display = "none";
+      } else {
+        nav.style.width = Math.round(46 + 110 * Math.min(1, (abs - 0.12) / (Math.PI * 0.62))) + "px";
+        navShape.style.transform = angle < 0 ? "scaleX(-1)" : "scaleX(1)";
+        nav.style.display = "block";
+      }
+    } else nav.style.display = "none";
 
-  // яма: падение в триггер -> fade 0.9с -> пещера; в пещере выход назад
-  if (!inCave) {
+    // Сама цель тоже помечена: пульсирующий ромб висит прямо на объекте,
+    // когда он впереди и в кадре. За спиной/за краем экрана метку не рисуем.
+    const W = engine.getRenderWidth(), H = engine.getRenderHeight();
+    const camFwd = camera.getDirection(new BABYLON.Vector3(0, 0, 1));
+    const inFront = BABYLON.Vector3.Dot(navTarget.subtract(camera.position), camFwd) > 0;
+    const v = BABYLON.Vector3.Project(navTarget, BABYLON.Matrix.Identity(),
+      scene.getTransformMatrix(), camera.viewport.toGlobal(W, H));
+    if (inFront && v.z > 0 && v.z < 1 && v.x > 26 && v.x < W - 26 && v.y > 26 && v.y < H - 26) {
+      mark.style.left = Math.round(v.x) + "px";
+      mark.style.top = Math.round(v.y) + "px";
+      mark.style.display = "block";
+    } else mark.style.display = "none";
+  } else {
+    nav.style.display = "none";
+    mark.style.display = "none";
+  }
+
+  // яма: падение в триггер -> fade 0.9с -> вагонетка в шахте (или пещера в тесте)
+  if (!inCave && !inMine && !(story && story.grateIntact)) {
     const d = Math.hypot(player.mesh.position.x - pit.trigger.x, player.mesh.position.z - pit.trigger.z);
     const dy = Math.abs(player.mesh.position.y - pit.trigger.y);
     if (!falling && d < pit.triggerR && dy < pit.triggerH / 2) { falling = true; fadeT = 0; }
-  } else {
+  } else if (inCave) {
     if (player.mesh.position.subtract(cave.exitPos).length() < 1.8) {
       inCave = false; falling = false;
       player.mesh.position.set(2, getHeight(2, 2) + 0.6, 2);
@@ -680,9 +776,16 @@ engine.runRenderLoop(() => {
     $("fade").style.opacity = Math.min(1, fadeT);
     if (fadeT >= 1) {
       fadeT = -1; falling = false;
-      inCave = true;
-      player.mesh.position.copyFrom(cave.spawnPos);
-      player.st.vel.set(0, 0, 0);
+      if (mine) {
+        // Сюжетная ветка: падаем в вагонетку и катимся по шахте.
+        mine.start();
+        if (story) story.notifyCave();
+      } else {
+        inCave = true;
+        player.mesh.position.copyFrom(cave.spawnPos);
+        player.st.vel.set(0, 0, 0);
+        if (story) story.notifyCave();
+      }
       setTimeout(() => $("fade").style.opacity = 0, 300);
     }
   }
@@ -699,5 +802,5 @@ addEventListener("resize", () => engine.resize());
 // Доступ для автотестов Playwright — только с ?test=1, в обычной игре не создаётся.
 if (new URLSearchParams(location.search).has("test")) {
   window.__game = { scene, camera, player, hud, campfire, campfireInteract,
-    damagePlayer, damageAnimal, getHeight, terrain, animals, meats, testScenes, BABYLON };
+    damagePlayer, damageAnimal, getHeight, terrain, animals, meats, arrows, testScenes, BABYLON };
 }

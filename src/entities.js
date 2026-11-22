@@ -1,12 +1,43 @@
 // Сущности: игрок, лук/стрелы, мясо, мобы (animal.gd), камеры наблюдения (camera_manager.gd).
 import * as BABYLON from "@babylonjs/core";
-import { getHeight } from "./noise.js";
+import { getHeight, PIT_CENTER, HOUSE_POS } from "./noise.js";
 import { breakGlass } from "./world.js";
 import { MODELS_BASE } from "./assets.js";
 
 const _down = new BABYLON.Vector3(0, -1, 0);
 const MAX_WALK_SLOPE = 2.0;  // ~63°: круче — уже стена воронки, вверх не пускаем
 const SLOPE_SAMPLE = 0.35;   // шаг конечной разности для градиента getHeight
+
+// Дом для зверей — сплошное препятствие с запасом на размер туловища.
+// Вместо прохода сквозь стены звери скользят вдоль них и обходят угол.
+const HOUSE_B = {
+  minX: HOUSE_POS.x - 3.0, maxX: HOUSE_POS.x + 3.0,
+  minZ: HOUSE_POS.z - 2.8, maxZ: HOUSE_POS.z + 2.8,
+};
+const insideHouseBox = (x, z) =>
+  x > HOUSE_B.minX && x < HOUSE_B.maxX && z > HOUSE_B.minZ && z < HOUSE_B.maxZ;
+function moveAnimalAroundHouse(p, dx, dz) {
+  // Если уже внутри — выталкиваем к ближайшей грани.
+  if (insideHouseBox(p.x, p.z)) {
+    const dl = p.x - HOUSE_B.minX, dr = HOUSE_B.maxX - p.x;
+    const db = p.z - HOUSE_B.minZ, df = HOUSE_B.maxZ - p.z;
+    const m = Math.min(dl, dr, db, df);
+    if (m === dl) p.x = HOUSE_B.minX;
+    else if (m === dr) p.x = HOUSE_B.maxX;
+    else if (m === db) p.z = HOUSE_B.minZ;
+    else p.z = HOUSE_B.maxZ;
+  }
+  const nx = p.x + dx, nz = p.z + dz;
+  if (!insideHouseBox(nx, nz)) { p.x = nx; p.z = nz; return; }
+  const inX = p.x > HOUSE_B.minX && p.x < HOUSE_B.maxX;
+  const inZ = p.z > HOUSE_B.minZ && p.z < HOUSE_B.maxZ;
+  if (inX && !inZ) { p.x = nx; return; } // идем вдоль стены по X
+  if (inZ && !inX) { p.z = nz; return; } // идем вдоль стены по Z
+  // Угол: блокируем ось, с которой глубже вошли в коробку.
+  const penX = Math.min(nx - HOUSE_B.minX, HOUSE_B.maxX - nx);
+  const penZ = Math.min(nz - HOUSE_B.minZ, HOUSE_B.maxZ - nz);
+  if (penX < penZ) p.z = nz; else p.x = nx;
+}
 
 // ---------- Игрок: SPEED 5, JUMP 4.5, мышь 0.002, HP 100 ----------
 export function createPlayer(scene, camera) {
@@ -15,6 +46,10 @@ export function createPlayer(scene, camera) {
   const mat = new BABYLON.StandardMaterial("playerMat", scene);
   mat.diffuseColor = new BABYLON.Color3(0.2, 0.4, 0.9);
   mesh.material = mat;
+  // Камера от первого лица иногда заглядывает внутрь собственной капсулы —
+  // тогда перед глазами появляется синий кружок. Тело не рисуем, коллизии
+  // и лучи (isPickable=false) при этом работают как раньше.
+  mesh.isVisible = false;
   mesh.checkCollisions = true;
   mesh.ellipsoid = new BABYLON.Vector3(0.35, 0.6, 0.35); // под капсулу: скользим по склонам
   mesh.isPickable = false; // самого себя лучами не ловим
@@ -58,13 +93,46 @@ export function updatePlayer(scene, player, camera, input, dt, frozen) {
     }
   }
   const steep = slope2 > MAX_WALK_SLOPE * MAX_WALK_SLOPE;
+  // Виртуальная стенка у дна воронки: чем глубже, тем уже радиус. Не даём
+  // подойти к самому крутому склону, где ещё видно обратную сторону меша.
+  if (mesh.position.y < -5) {
+    const px = mesh.position.x - PIT_CENTER.x, pz = mesh.position.z - PIT_CENTER.z;
+    const d = Math.hypot(px, pz);
+    const limit = Math.max(2.0, 2.9 - 0.08 * (-mesh.position.y - 5));
+    if (d > 1e-4) {
+      const nx = px / d, nz = pz / d;
+      // Небольшой запас: не дёргаем позицию каждый кадр из-за микро-выхода за радиус.
+      if (d > limit + 0.06) {
+        mesh.position.x = PIT_CENTER.x + nx * limit;
+        mesh.position.z = PIT_CENTER.z + nz * limit;
+      }
+      if (d > limit - 0.1 && move.lengthSquared() > 0) {
+        const outward = move.x * nx + move.z * nz;
+        if (outward > 0) { move.x -= nx * outward; move.z -= nz * outward; }
+      }
+    }
+  }
+  // Пока решётка цела, яма — непроходимая стена: не даём шагнуть внутрь.
+  if (st.pitBlocked && mesh.position.y > -5) {
+    const px = mesh.position.x - PIT_CENTER.x, pz = mesh.position.z - PIT_CENTER.z;
+    const d = Math.hypot(px, pz);
+    if (d > 1e-4 && d < 5.2) {
+      const nx = px / d, nz = pz / d;
+      if (d < 4.2) {
+        mesh.position.x = PIT_CENTER.x + nx * 4.2;
+        mesh.position.z = PIT_CENTER.z + nz * 4.2;
+      }
+      const inward = -(move.x * nx + move.z * nz);
+      if (inward > 0) { move.x += nx * inward; move.z += nz * inward; }
+    }
+  }
   // НОВЫЙ СПОСОБ: земля НЕ участвует в коллизиях. Горизонтальным движением
   // занимается moveWithCollisions (только стены дома и стволы), а высоту мы
   // берём напрямую из getHeight() — той же функции, по которой строится меш.
   // Раньше эллипсоид упирался в крутой склон воронки и застревал на кромке.
   mesh.moveWithCollisions(move);
 
-  if (input.jump && st.grounded) { st.vel.y = 4.5; st.grounded = false; input.jump = false; }
+  if (input.jump && st.grounded && !steep) { st.vel.y = 4.5; st.grounded = false; input.jump = false; }
 
   if (mesh.position.y > -30) {
     // Над поверхностью: кинематическое следование рельефу, без инерции и скольжения.
@@ -76,8 +144,9 @@ export function updatePlayer(scene, player, camera, input, dt, frozen) {
     if (houseHit?.pickedMesh && houseHit.pickedPoint.y > groundY) groundY = houseHit.pickedPoint.y;
     const targetY = groundY + 0.6;
     if (steep) {
-      // Стенка воронки: стоять нельзя. Соскальзываем вниз, но не «приклеиваемся»
-      // к земле за кадр: ограничение скорости спуска убирает телепорт на дно.
+      // Крутой склон: соскальзываем вниз, но НЕ переводим игрока в «полёт».
+      // Иначе на каждый кадр состояние дёргалось и казалось, что мы тычемся
+      // в углы рельефа. Скорость спуска ограничена — без телепорта на дно.
       const inv = 1 / Math.sqrt(slope2);
       const slide = 2.5 * dt;
       mesh.position.x -= gx * inv * slide;
@@ -85,7 +154,7 @@ export function updatePlayer(scene, player, camera, input, dt, frozen) {
       const gy = getHeight(mesh.position.x, mesh.position.z) + 0.6;
       mesh.position.y = Math.max(gy, mesh.position.y - 4.5 * dt);
       st.vel.y = 0;
-      st.grounded = false;
+      st.grounded = true;
     } else if (!st.grounded) {
       // В ВОЗДУХЕ: полная баллистика и вверх, и вниз. Раньше ветка шла по
       // vel.y > 0 — в апогее (vel.y <= 0) игрока мгновенно приклеивало к земле.
@@ -93,14 +162,10 @@ export function updatePlayer(scene, player, camera, input, dt, frozen) {
       mesh.position.y += st.vel.y * dt;
       if (mesh.position.y <= targetY) { mesh.position.y = targetY; st.vel.y = 0; st.grounded = true; }
     } else {
-      // Ходьба: стоим на рельефе без инерции. Но если земля ушла вниз резко
-      // (кромка воронки/ямы), не телепортируемся за ней, а отпускаем в падение.
-      if (mesh.position.y - targetY > 0.18) {
-        st.grounded = false; // на следующем кадре включится баллистика
-      } else {
-        mesh.position.y = targetY;
-        st.vel.y = 0;
-      }
+      // Ходьба: плавно следуем рельефу. Спуск ограничен 4.5 м/с, поэтому
+      // резкий обрыв не дёргает игрока и не включает/выключает состояние полёта.
+      mesh.position.y = Math.max(targetY, mesh.position.y - 4.5 * dt);
+      st.vel.y = 0;
     }
   } else {
     // Пещера: там свой пол и стены, высота берётся коллизиями как раньше.
@@ -108,15 +173,22 @@ export function updatePlayer(scene, player, camera, input, dt, frozen) {
     mesh.moveWithCollisions(new BABYLON.Vector3(0, st.vel.y * dt, 0));
     if (mesh.position.y < -59.4) { mesh.position.y = -59.4; st.vel.y = 0; st.grounded = true; }
   }
-  camera.position.set(mesh.position.x, mesh.position.y + 0.45, mesh.position.z);
+  // Плавное следование камеры по высоте: при вылезании из глубокой ямы
+  // аналитическая высота меняется рывками, а камера теперь сглаживает их.
+  const camTargetY = mesh.position.y + 0.45;
+  if (st.camY === undefined || Math.abs(camTargetY - st.camY) > 4) st.camY = camTargetY;
+  else st.camY += (camTargetY - st.camY) * Math.min(1, dt * 18);
+  camera.position.set(mesh.position.x, st.camY, mesh.position.z);
   camera.rotation.set(st.pitch, st.yaw, 0);
   mesh.rotation.y = st.yaw;
 }
 
-export function damagePlayer(player, amount, hud) {
+export function damagePlayer(player, amount, hud, flash = true) {
   player.st.hp = Math.max(0, player.st.hp - amount);
   // Удар зверя: экран краснеет ВСЁ СИЛЬНЕЕ (накопление, затухание — в main.js).
-  player.st.flash = Math.min(1, player.st.flash + 0.3);
+  // Урон зоны передаёт flash=false: там урон идёт каждую секунду и постоянная
+  // красная вспышка просто залила бы весь экран.
+  if (flash) player.st.flash = Math.min(1, player.st.flash + 0.3);
   if (player.st.hp <= 0) {
     player.mesh.position.copyFrom(player.st.spawn);
     player.st.vel.set(0, 0, 0);
@@ -368,8 +440,13 @@ export function updateArrows(scene, dt, animals, glass, player) {
       }
       a.stopped = true;
     }
-    const g = getHeight(a.mesh.position.x, a.mesh.position.z);
-    if (a.mesh.position.y < g) { a.mesh.position.y = g + 0.04; a.stopped = true; }
+    // Аналитическую землю учитываем только на поверхности: в пещере/шахте
+    // (y < -30) getHeight() возвращает рельеф далеко наверху, и без этого
+    // условия стрела телепортировалась на поверхность и «застревала» там.
+    if (a.mesh.position.y > -30) {
+      const g = getHeight(a.mesh.position.x, a.mesh.position.z);
+      if (a.mesh.position.y < g) { a.mesh.position.y = g + 0.04; a.stopped = true; }
+    }
     a.age += dt;
     if (a.age > 30) { a.mesh.dispose(); arrows.splice(i, 1); }
   }
@@ -404,12 +481,45 @@ export function updateMeats(scene, dt, player, hud) {
   }
 }
 
+// ---------- Смола аномальных деревьев: подбирается автоматически ----------
+export const resins = [];
+export function spawnResin(scene, pos) {
+  const mesh = BABYLON.MeshBuilder.CreateSphere("resin", { diameter: 0.28, segments: 10 }, scene);
+  const mat = new BABYLON.StandardMaterial("resinMat", scene);
+  mat.diffuseColor = new BABYLON.Color3(0.55, 0.28, 0.03);
+  mat.emissiveColor = new BABYLON.Color3(0.85, 0.42, 0.04);
+  mesh.material = mat;
+  mesh.position.copyFrom(pos).addInPlace(new BABYLON.Vector3(0, 0.4, 0));
+  mesh.metadata = { kind: "resin" };
+  mesh.isPickable = false;
+  resins.push({ mesh, vel: new BABYLON.Vector3(0, 1.2, 0), age: 0 });
+}
+export function updateResins(scene, dt, player, toast) {
+  for (let i = resins.length - 1; i >= 0; i--) {
+    const c = resins[i];
+    c.age += dt;
+    c.vel.y -= 9.8 * dt;
+    c.mesh.position.addInPlace(c.vel.scale(dt));
+    const g = getHeight(c.mesh.position.x, c.mesh.position.z) + 0.18;
+    if (c.mesh.position.y < g) { c.mesh.position.y = g; c.vel.set(0, 0, 0); }
+    c.mesh.rotation.y += dt * 2;
+    c.mesh.scaling.setAll(0.95 + 0.1 * Math.sin(c.age * 5));
+    if (c.mesh.position.subtract(player.mesh.position).length() < 1.3) {
+      player.st.resin = true;
+      toast("Смола получена — используйте её на решётке ямы");
+      c.mesh.dispose(); resins.splice(i, 1);
+    }
+  }
+}
+
 // ---------- Мобы: rabbit/fox/wolf (h, speed, hp, dmg из animal.gd) ----------
 // У лисы и волка 2 жизни: первая стрела застревает в звере, вторая добивает.
 export const KINDS = {
   rabbit: { h: 0.45, speed: 1.7, hp: 1, dmg: 0, color: new BABYLON.Color3(0.8, 0.75, 0.7) },
   fox:    { h: 0.55, speed: 1.3, hp: 2, dmg: 8, color: new BABYLON.Color3(0.9, 0.45, 0.15) },
   wolf:   { h: 0.7, speed: 1.1, hp: 2, dmg: 12, color: new BABYLON.Color3(0.4, 0.4, 0.45) },
+  // Сюжетная аномалия у ямы: недвижимая мишень, из неё выпадает заражённое ядро.
+  anomaly: { h: 0.6, speed: 0, hp: 1, dmg: 0, color: new BABYLON.Color3(0.8, 0.12, 0.12) },
 };
 export const animals = [];
 // Поправка ориентации модели. glTF правосторонний, Babylon левосторонний —
@@ -472,6 +582,54 @@ export async function spawnAnimal(scene, kind, pos) {
   // хитбокс = сам меш (layer 3 в оригинале)
   const an = { mesh, hitbox: mesh, kind, info, hp: info.hp, st: { dead: false, deathAge: 0, spawnAge: 0,
     wanderTarget: null, wanderT: 0, attackCd: 0, attackT: 0, forcedAggro: false, groundT: 0 }, disposed: false };
+  // Бешенство: пена из пасти лисы и волка. Нос модели смотрит в локальный -Z
+  // хитбокса, поэтому пузыри крепим спереди по -Z. Дочерние меши не pickable —
+  // стрела по-прежнему попадает в хитбокс, а не в пену.
+  if (kind === "fox" || kind === "wolf") {
+    const root = new BABYLON.TransformNode("foam_" + kind, scene);
+    root.parent = mesh;
+    root.position.set(0, info.h * 0.18, -0.52);
+    const fm = new BABYLON.StandardMaterial("foamMat_" + kind, scene);
+    fm.diffuseColor = new BABYLON.Color3(0.93, 0.96, 1);
+    fm.emissiveColor = new BABYLON.Color3(0.3, 0.36, 0.45);
+    fm.specularColor = new BABYLON.Color3(0.25, 0.25, 0.25);
+    const bubbles = [];
+    for (let i = 0; i < 10; i++) {
+      const d = info.h * (0.045 + Math.random() * 0.035);
+      const b = BABYLON.MeshBuilder.CreateSphere("foamBubble", { diameter: d, segments: 6 }, scene);
+      b.material = fm; b.parent = root;
+      const x = (Math.random() - 0.5) * 0.13;
+      const y = (Math.random() - 0.5) * 0.04;
+      const z = (Math.random() - 0.5) * 0.06;
+      b.position.set(x, y, z);
+      // Каждый пузырь — капля со своей фазой: рождается у пасти, стекает
+      // вниз и исчезает, затем цикл повторяется. Так пена «льётся».
+      b.metadata = {
+        x, y, z,
+        phase: Math.random(),
+        speed: 0.7 + Math.random() * 0.6,
+        driftX: (Math.random() - 0.5) * 0.1,
+        driftZ: -0.02 - Math.random() * 0.06,
+      };
+      b.isPickable = false;
+      bubbles.push(b);
+    }
+    an.foam = { root, bubbles, t: Math.random() * 10 };
+  }
+  // Аномалия — не зверь, а светящийся сгусток. Хитбокс остаётся невидимым,
+  // но pickable: стрела попадает в него как в обычного моба.
+  if (kind === "anomaly") {
+    mesh.material.alpha = 0;
+    const orb = BABYLON.MeshBuilder.CreateSphere("anomalyOrb", { diameter: 0.62, segments: 12 }, scene);
+    const om = new BABYLON.StandardMaterial("anomalyMat", scene);
+    om.diffuseColor = new BABYLON.Color3(0.35, 0.02, 0.02);
+    om.emissiveColor = new BABYLON.Color3(0.7, 0.05, 0.05);
+    om.specularColor = new BABYLON.Color3(0.4, 0.1, 0.1);
+    orb.material = om; orb.parent = mesh; orb.isPickable = false;
+    an.orb = orb;
+    animals.push(an);
+    return an;
+  }
   // Пытаемся заменить бокс на .glb (не критично если нет).
   try {
     const res = await BABYLON.SceneLoader.ImportMeshAsync("", MODELS_BASE(), MODEL_FILES[kind], scene);
@@ -585,7 +743,29 @@ export function updateAnimals(scene, dt, player, hud) {
       if (an.st.deathAge > 0.7) { an.mesh.dispose(); an.disposed = true; animals.splice(i, 1); }
       continue;
     }
+    if (an.kind === "anomaly") {
+      // Сгусток стоит на месте и только пульсирует — это сюжетная мишень.
+      an.st.spawnAge += dt;
+      an.mesh.scaling.setAll(0.92 + 0.06 * Math.sin(an.st.spawnAge * 4));
+      if (an.orb) an.orb.rotation.y += dt * 0.7;
+      continue;
+    }
     an.st.spawnAge += dt;
+    // Пена течёт: капля появляется у пасти, стекает вниз и сжимается в ноль.
+    if (an.foam) {
+      an.foam.t += dt;
+      const LIFE = 1.3;
+      for (const b of an.foam.bubbles) {
+        const m = b.metadata;
+        const k = (an.foam.t * m.speed / LIFE + m.phase) % 1;
+        b.position.set(
+          m.x + m.driftX * k + Math.sin(an.foam.t * 9 + m.phase * 10) * 0.008,
+          m.y - 0.26 * k,           // стекаем вниз из пасти
+          m.z + m.driftZ * k);      // немного вперёд по ходу морды
+        const s = Math.max(0.08, 1 - k * 1.05) * (0.85 + 0.15 * Math.sin(an.foam.t * 12 + m.phase * 8));
+        b.scaling.set(s, s, s);
+      }
+    }
     const sIn = Math.min(1, an.st.spawnAge / 0.4);
     an.mesh.scaling.setAll(Math.max(0.01, sIn));
     const p = an.mesh.position;
@@ -649,7 +829,7 @@ export function updateAnimals(scene, dt, player, hud) {
     const faceRate = (an.kind === "rabbit" ? 3.5 : 2.5) * dt;
     const kyaw = KIND_YAW[an.kind] || 0;
     if (dir) {
-      p.x += dir.x * spd * dt; p.z += dir.z * spd * dt;
+      moveAnimalAroundHouse(p, dir.x * spd * dt, dir.z * spd * dt);
       an.mesh.rotation.y = smoothYaw(an.mesh.rotation.y, Math.atan2(dir.x, dir.z) + kyaw, faceRate);
     } else if (holdFace) {
       const hx = holdFace.x - p.x, hz = holdFace.z - p.z;
@@ -711,8 +891,7 @@ export function updateAnimals(scene, dt, player, hud) {
       const tgt = an.st.attackTarget;
       const tpx = tgt === pp ? pp.x : tgt.x, tpz = tgt === pp ? pp.z : tgt.z;
       const lyaw = Math.atan2(tpx - p.x, tpz - p.z);
-      p.x += Math.sin(lyaw) * lunge * dt * 3;
-      p.z += Math.cos(lyaw) * lunge * dt * 3;
+      moveAnimalAroundHouse(p, Math.sin(lyaw) * lunge * dt * 3, Math.cos(lyaw) * lunge * dt * 3);
       const mind = 0.85;
       const ddx = p.x - tpx, ddz = p.z - tpz;
       const dd = Math.hypot(ddx, ddz);

@@ -31,7 +31,7 @@ npm run build   # прод-сборка в dist/
 | Дверь | 4м, 2.2 рад/с, -100° | `world.js:updateDoor` |
 | Стекло | 16 осколков, 2–4с | `world.js:breakGlass` |
 | Мясо | +1, жизнь 30с | `entities.js:updateMeats` |
-| Яма/пещера | fade 0.9с, триггер r2.8 h8 | `main.js`, `world.js:buildPit/buildCave` |
+| Яма/шахта | fade 0.9с, триггер r2.8 h8; после падения — вагонетка на рельсах, ворота открываются стрелой в красную метку | `main.js`, `world.js:buildPit/buildCave`, `mine.js` |
 
 Модели `.glb` и текстуры скопированы из `../3dgame` в `public/assets/` — мобы пытаются подгрузить свои glb, при отсутствии показывают цветной бокс.
 

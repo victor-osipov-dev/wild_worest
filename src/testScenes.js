@@ -4,7 +4,7 @@
 // Обычная игра без ?scene= не знает об этом модуле.
 import * as BABYLON from "@babylonjs/core";
 import { getHeight, HOUSE_POS, PIT_CENTER } from "./noise.js";
-import { spawnAnimal, animals, arrows, meats } from "./entities.js";
+import { spawnAnimal, animals, arrows, meats, resins } from "./entities.js";
 
 const $ = (id) => document.getElementById(id);
 const EYE = 0.45; // смещение камеры над центром капсулы (как в updatePlayer)
@@ -42,6 +42,8 @@ export function createTestScenes(ctx) {
     arrows.length = 0;
     for (const m of meats) if (!m.mesh.isDisposed()) m.mesh.dispose();
     meats.length = 0;
+    for (const c of resins) if (!c.mesh.isDisposed()) c.mesh.dispose();
+    resins.length = 0;
     for (const an of animals) if (an.mesh && !an.mesh.isDisposed()) an.mesh.dispose();
     animals.length = 0;
     for (const cam of mgr.list) if (!cam.isDisposed()) cam.dispose();

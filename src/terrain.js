@@ -19,10 +19,12 @@ BABYLON.Effect.ShadersStore["impostorVertexShader"] = `
 attribute vec3 position;
 attribute vec2 uv;
 attribute vec3 anchor;
+attribute vec3 tint;
 uniform mat4 view;
 uniform mat4 viewProjection;
 uniform float vFlip;
 varying vec2 vUV;
+varying vec3 vTint;
 #include<fogVertexDeclaration>
 void main() {
   // Первая строка view-матрицы = ось X камеры в мировых координатах (право
@@ -34,6 +36,7 @@ void main() {
   gl_Position = viewProjection * vec4(worldPos, 1.0);
   // vFlip: канвас-атлас (v=0 — верх) и GPU-атлас RT (v=0 — низ кадра) — разные
   vUV = vec2(uv.x, mix(uv.y, 1.0 - uv.y, vFlip));
+  vTint = tint;
 #ifdef FOG
   vFogDistance = (view * vec4(worldPos, 1.0)).xyz;
 #endif
@@ -43,6 +46,7 @@ BABYLON.Effect.ShadersStore["impostorFragmentShader"] = `
 uniform sampler2D map;
 uniform vec2 texSize;
 varying vec2 vUV;
+varying vec3 vTint;
 #include<fogFragmentDeclaration>
 void main() {
   vec4 color = texture2D(map, vUV);
@@ -62,6 +66,7 @@ void main() {
     if (n4.a > best.a) best = n4;
     color.rgb = mix(color.rgb, best.rgb, clamp((0.95 - color.a) * 3.0, 0.0, 1.0));
   }
+  color.rgb *= vTint;
 #ifdef FOG
   color.rgb = mix(vFogColor, color.rgb, CalcFogFactor());
 #endif
@@ -275,7 +280,7 @@ function makeImpostorMaterial(scene, name, url, texW, texH) {
   const fogOn = scene.fogEnabled && scene.fogMode !== BABYLON.Scene.FOGMODE_NONE;
   const m = new BABYLON.ShaderMaterial(name, scene,
     { vertex: "impostor", fragment: "impostor" }, {
-      attributes: ["position", "uv", "anchor"],
+      attributes: ["position", "uv", "anchor", "tint"],
       uniforms: ["view", "viewProjection", "vFlip", "texSize",
         "vFogInfos", "vFogColor"],
       samplers: ["map"],
@@ -366,6 +371,10 @@ export function initTerrain(scene) {
     t.setEnabled(false);
     return t;
   });
+  // Индивидуальный цвет инстансов: деревьям в заражённой зоне можно поменять
+  // оттенок, не трогая общий материал и не разбивая батчинг.
+  trunkTpl.registerInstancedBuffer("color", 4);
+  for (const t of leafTpls) t.registerInstancedBuffer("color", 4);
 
   // Материалы импостеров дальнего леса: ВЕСЬ дальний лес = 1 draw call на чанк
   // (одна слитая карточка для деревьев + одна для кустов).
@@ -612,6 +621,22 @@ function setChunkVisible(ch, v) {
   for (const sp of ch.sprites) sp.setEnabled(v); // слитые карточки-импостеры
 }
 
+// Убирает уже построенные кусты в радиусе (x,z): сюжет расчищает обзор
+// у остатков растворённой камеры. Будущие чанки режет st.bushClearAt.
+export function clearBushes(st, x, z, radius) {
+  const r2 = radius * radius;
+  for (const ch of st.chunks.values()) {
+    for (let i = ch.nodes.length - 1; i >= 0; i--) {
+      const n = ch.nodes[i];
+      if (n.name !== "bush") continue;
+      const dx = n.position.x - x, dz = n.position.z - z;
+      if (dx * dx + dz * dz > r2) continue;
+      ch.nodes.splice(i, 1);
+      n.dispose();
+    }
+  }
+}
+
 // Мягкая коллизия со стволами по чанкам игрока (3x3): спрайты-деревья в
 // кольце не имеют физических мешей, поэтому выталкиваем позицию сами.
 // Радиус = полуствол + радиус эллипсоида игрока; выталкиваем только XZ.
@@ -679,9 +704,12 @@ function populateTrees(st, ch, ox, oz, far = false) {
       // Мягкая коллизия игрока: спрайты-деревья сами не коллят, а тонкий
       // ствол-инстанс в своём чанке есть — радиус одинаков, чтобы не спорили.
       const r = 0.12 * s + 0.35;
-      ch.treePts.push({ x: px, z: pz, r, r2: r * r });
+      const nodes = far ? [] : makeTreeInst(st, ch, px, y, pz, s, rand01(rng) * Math.PI * 2);
+      ch.treePts.push({
+        x: px, z: pz, r, r2: r * r, nodes,
+        infected: !!(st.infectionAt && st.infectionAt(px, pz)),
+      });
       if (far) addTreeSprite(st, ch, px, y, pz, s, Math.abs(Math.round(px * 3 + pz)) % 3);
-      else makeTreeInst(st, ch, px, y, pz, s, rand01(rng) * Math.PI * 2);
     }
   }
 }
@@ -702,6 +730,8 @@ function populateBushes(st, ch, ox, oz, far = false) {
       if (slopeAt(px, pz) > 3.0) continue;
       const s = 0.6 + rand01(rng) * 0.55;
       const y = getHeight(px, pz);
+      // Сюжет может попросить не заращивать кустами место остатков камеры.
+      if (st.bushClearAt && st.bushClearAt(px, pz)) continue;
       if (far) addBushSprite(st, ch, px, y, pz, s, Math.abs(Math.round(px * 5 + pz * 2)) % 2);
       else makeBushInst(st, ch, px, y, pz, s);
     }
@@ -743,6 +773,10 @@ function buildImpostorChunk(st, ch) {
     if (!cards.length) continue;
     const cols = kind === "tree" ? st.treeCols : st.bushCols;
     const positions = [], uvs = [], anchors = [], normals = [], indices = [];
+    // Цвет заражения на каждую карточку: за стеной лес темнеет и краснеет.
+    // Атрибут статичен на момент сборки чанка, дальше его обновляет
+    // refreshInfection() по мере сжатия зоны.
+    const tint = [];
     const min = new BABYLON.Vector3(Infinity, Infinity, Infinity);
     const max = new BABYLON.Vector3(-Infinity, -Infinity, -Infinity);
     for (const c of cards) {
@@ -750,6 +784,9 @@ function buildImpostorChunk(st, ch) {
       const x0 = c.x - c.w / 2, x1 = c.x + c.w / 2, y1 = c.y + c.h;
       positions.push(x0, y1, c.z, x1, y1, c.z, x0, c.y, c.z, x1, c.y, c.z);
       for (let i = 0; i < 4; i++) { anchors.push(c.x, c.y, c.z); normals.push(0, 0, -1); }
+      const tc = st.infectionAt && st.infectionAt(c.x, c.z)
+        ? INFECT_SPRITE : NORMAL_SPRITE;
+      for (let i = 0; i < 4; i++) tint.push(tc.r, tc.g, tc.b);
       const u0 = c.cell / cols, u1 = (c.cell + 1) / cols;
       uvs.push(u0, 0, u1, 0, u0, 1, u1, 1);
       indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
@@ -766,6 +803,7 @@ function buildImpostorChunk(st, ch) {
     vd.applyToMesh(mesh);
     // stride обязателен: у нестандартного kind нет DeduceStride
     mesh.setVerticesData("anchor", anchors, false, 3);
+    mesh.setVerticesData("tint", new Float32Array(tint), false, 3);
     mesh.setBoundingInfo(new BABYLON.BoundingInfo(min, max));
     mesh.material = kind === "tree" ? st.treeMat : st.bushMat;
     // Пик ВКЛЮЧАЕМ: спрайты теперь начинаются в 16м от игрока — стрелы и
@@ -777,11 +815,71 @@ function buildImpostorChunk(st, ch) {
     mesh.checkCollisions = false;
     mesh.freezeWorldMatrix();
     ch.sprites.push(mesh);
+    if (!ch.tints) ch.tints = [];
+    ch.tints.push({ mesh, cards, values: new Float32Array(tint) });
   }
 }
 
+// Обновляет «заражённость» леса: 3D-инстансы деревьев и слитые карточки
+// дальнего леса. Предикат задаёт story: terrain.infectionAt = (x, z) => outside.
+// Вызывается по таймеру, когда стена сжимается; новые чанки красятся сразу
+// при сборке (см. makeTreeInst / buildImpostorChunk).
+export function refreshInfection(st) {
+  const fn = st.infectionAt;
+  if (!fn) return;
+  for (const ch of st.chunks.values()) {
+    for (const t of ch.treePts) {
+      if (!t.nodes || !t.nodes.length) continue;
+      const inf = !!fn(t.x, t.z);
+      if (t.infected === inf) continue;
+      t.infected = inf;
+      for (let i = 0; i < t.nodes.length; i++) {
+        const n = t.nodes[i];
+        if (!n.instancedBuffers) continue;
+        const src = i === 0
+          ? (inf ? INFECT_TRUNK : NORMAL_INST)
+          : (inf ? INFECT_LEAF : NORMAL_INST);
+        n.instancedBuffers.color = src.clone();
+      }
+    }
+    // Кусты — тоже часть заражённого леса.
+    for (const n of ch.nodes) {
+      if (n.name !== "bush") continue;
+      const inf = !!fn(n.position.x, n.position.z);
+      if (n.__inf === inf) continue;
+      n.__inf = inf;
+      n.instancedBuffers.color = (inf ? INFECT_LEAF : NORMAL_INST).clone();
+    }
+    if (!ch.tints) continue;
+    for (const rec of ch.tints) {
+      let changed = false;
+      const vals = rec.values;
+      for (let i = 0; i < rec.cards.length; i++) {
+        const c = rec.cards[i];
+        const tc = fn(c.x, c.z) ? INFECT_SPRITE : NORMAL_SPRITE;
+        const o = i * 12;
+        for (let v = 0; v < 4; v++) {
+          const q = o + v * 3;
+          if (vals[q] !== tc.r || vals[q + 1] !== tc.g || vals[q + 2] !== tc.b) changed = true;
+          vals[q] = tc.r; vals[q + 1] = tc.g; vals[q + 2] = tc.b;
+        }
+      }
+      if (changed) rec.mesh.updateVerticesData("tint", vals);
+    }
+  }
+}
+
+const INFECT_SPRITE = new BABYLON.Color3(0.5, 0.82, 0.25);
+const NORMAL_SPRITE = new BABYLON.Color3(1, 1, 1);
+const INFECT_TRUNK = new BABYLON.Color4(0.25, 0.34, 0.12, 1);
+const INFECT_LEAF = new BABYLON.Color4(0.32, 0.66, 0.1, 1);
+const NORMAL_INST = new BABYLON.Color4(1, 1, 1, 1);
+
 function makeTreeInst(st, ch, x, y, z, s, rotY) {
+  const nodes = [];
+  const infected = !!(st.infectionAt && st.infectionAt(x, z));
   const trunk = st.trunkTpl.createInstance(`trunk`);
+  trunk.instancedBuffers.color = (infected ? INFECT_TRUNK : NORMAL_INST).clone();
   trunk.position.set(x, y + 1.3 * s, z);
   trunk.scaling.setAll(s);
   trunk.rotation.y = rotY;
@@ -790,23 +888,28 @@ function makeTreeInst(st, ch, x, y, z, s, rotY) {
   trunk.metadata = { kind: "tree" };
   // Статика: без пересчёта world matrix каждый кадр (тысячи инстансов)
   trunk.freezeWorldMatrix();
-  ch.nodes.push(trunk);
+  ch.nodes.push(trunk); nodes.push(trunk);
   const leafTpl = st.leafTpls[Math.abs(Math.round(x * 3 + z)) % 3];
   [[0, 2.75, 0, 1.6], [0.1, 3.1, -0.1, 1.3], [-0.1, 3.45, 0.1, 1.0]].forEach(([ox, oy, oz, d]) => {
     const leaf = leafTpl.createInstance(`leaf`);
+    leaf.instancedBuffers.color = (infected ? INFECT_LEAF : NORMAL_INST).clone();
     const ca = Math.cos(rotY), sa = Math.sin(rotY);
     leaf.position.set(x + (ox * ca - oz * sa) * s, y + oy * s, z + (ox * sa + oz * ca) * s);
     leaf.scaling.setAll(d * s);
     leaf.isPickable = false;
     leaf.freezeWorldMatrix();
-    ch.nodes.push(leaf);
+    ch.nodes.push(leaf); nodes.push(leaf);
   });
+  return nodes;
 }
 
 function makeBushInst(st, ch, x, y, z, s) {
   const leafTpl = st.leafTpls[Math.abs(Math.round(x * 5 + z * 2)) % 3];
+  const infected = !!(st.infectionAt && st.infectionAt(x, z));
   [[0, 0.4, 0, 0.8], [0.3, 0.3, 0.2, 0.6], [-0.3, 0.3, -0.15, 0.5]].forEach(([ox, oy, oz, d]) => {
     const b = leafTpl.createInstance(`bush`);
+    b.instancedBuffers.color = (infected ? INFECT_LEAF : NORMAL_INST).clone();
+    b.__inf = infected;
     b.position.set(x + ox * s, y + oy * s, z + oz * s);
     b.scaling.setAll(d * s);
     b.isPickable = false;

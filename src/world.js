@@ -428,6 +428,7 @@ export function campfireInteract(cf, player, hud, toast) {
     if (player.st.hp >= 100) { toast("Здоровье и так полное"); return; }
     cf.phase = "idle"; cf.t = 0; cf.meat.setEnabled(false);
     player.st.hp = 100;
+    player.st.meatEaten = (player.st.meatEaten || 0) + 1;
     hud();
     toast("Жареное мясо съедено — здоровье восстановлено");
     return;
@@ -477,7 +478,7 @@ export function buildPit(scene) {
   };
   fogBand("top", -4.5, -0.8, 40, 0.22, 1.2, 2.4);
   fogBand("mid", -9.0, -4.5, 95, 0.38, 1.7, 3.3);
-  fogBand("bottom", -13.0, -9.0, 145, 0.55, 2.1, 4.0);
+  fogBand("bottom", -13.8, -9.0, 240, 0.68, 2.4, 4.6);
 
   // Восходящие миазмы: 30 частиц, жизнь 4с, скорость 0..1.6 вверх
   const ps = new BABYLON.ParticleSystem("motes", 30, scene);
