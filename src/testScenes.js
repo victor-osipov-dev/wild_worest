@@ -5,6 +5,7 @@
 import * as BABYLON from "@babylonjs/core";
 import { getHeight, HOUSE_POS, PIT_CENTER } from "./noise.js";
 import { spawnAnimal, animals, arrows, meats, resins } from "./entities.js";
+import { t, onLangChange } from "./i18n.js";
 
 const $ = (id) => document.getElementById(id);
 const EYE = 0.45; // смещение камеры над центром капсулы (как в updatePlayer)
@@ -224,23 +225,27 @@ export function createTestScenes(ctx) {
   document.body.appendChild(panel);
 
   function renderPanel(def) {
-    const li = (arr) => arr.map((s) => `<li>${s}</li>`).join("");
+    const li = (arr) => arr.map((s) => `<li>${t(s)}</li>`).join("");
     panel.innerHTML = `
-      <div style="font:bold 13px monospace;color:#8f8">ТЕСТ: ${def.name}</div>
-      <div style="margin:6px 0;color:#9c9">Цель: ${def.goal}</div>
-      <div><b>Механики:</b><ul style="margin:2px 0 0 16px;padding:0">${li(def.mechanics)}</ul></div>
-      <div style="margin-top:6px"><b>Старт:</b> ${def.start}</div>
-      <div style="margin-top:6px"><b>Сделайте:</b><ol style="margin:2px 0 0 16px;padding:0">${li(def.steps)}</ol></div>
-      <div style="margin-top:6px"><b>Ожидается:</b> ${def.expected}</div>
-      <div style="margin-top:6px;color:#f99"><b>Не покрывает:</b> ${def.notCovered}</div>
-      <div style="margin-top:8px;color:#8f8">R — перезапустить · N/P — следующая/предыдущая сцена</div>
+      <div style="font:bold 13px monospace;color:#8f8">${t("ТЕСТ: {name}", { name: t(def.name) })}</div>
+      <div style="margin:6px 0;color:#9c9">${t("Цель: {goal}", { goal: t(def.goal) })}</div>
+      <div><b>${t("Механики:")}</b><ul style="margin:2px 0 0 16px;padding:0">${li(def.mechanics)}</ul></div>
+      <div style="margin-top:6px"><b>${t("Старт:")}</b> ${t(def.start)}</div>
+      <div style="margin-top:6px"><b>${t("Сделайте:")}</b><ol style="margin:2px 0 0 16px;padding:0">${li(def.steps)}</ol></div>
+      <div style="margin-top:6px"><b>${t("Ожидается:")}</b> ${t(def.expected)}</div>
+      <div style="margin-top:6px;color:#f99"><b>${t("Не покрывает:")}</b> ${t(def.notCovered)}</div>
+      <div style="margin-top:8px;color:#8f8">${t("R — перезапустить · N/P — следующая/предыдущая сцена")}</div>
       <div style="margin-top:6px;pointer-events:auto">
         <select id="testSceneSelect" style="font:12px monospace;background:#111;color:#dfd">
-          ${SCENES.map((s) => `<option value="${s.id}"${s.id === def.id ? " selected" : ""}>${s.name}</option>`).join("")}
+          ${SCENES.map((s) => `<option value="${s.id}"${s.id === def.id ? " selected" : ""}>${t(s.name)}</option>`).join("")}
         </select>
       </div>`;
     $("testSceneSelect").onchange = (e) => switchTo(e.target.value);
   }
+  onLangChange(() => {
+    const def = SCENES.find((s) => s.id === current) || SCENES[0];
+    renderPanel(def);
+  });
 
   let current = SCENES[0].id;
   function switchTo(id) {

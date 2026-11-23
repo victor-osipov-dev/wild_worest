@@ -7,6 +7,7 @@ import { getHeight, PIT_CENTER, HOUSE_POS } from "./noise.js";
 import { DangerZone } from "./dangerZone.js";
 import { refreshInfection, clearBushes } from "./terrain.js";
 import { removeCamera } from "./entities.js";
+import { t, onLangChange } from "./i18n.js";
 
 export function createStory(ctx) {
   const { scene, player, mgr, hud, toast, buildCamera, terrain, screen, camera } = ctx;
@@ -28,8 +29,9 @@ export function createStory(ctx) {
   const zone = new DangerZone(scene, player, hud, {
     x: HOUSE_POS.x, z: HOUSE_POS.z,
     startRadius: 55, targetRadius: 18, duration: 150, damage: 1.5,
+    terrain,
   });
-  zone.onOutside = () => toast("КИСЛОТНАЯ ЗОНА — возвращайтесь к дому!");
+  zone.onOutside = () => toast(t("КИСЛОТНАЯ ЗОНА — возвращайтесь к дому!"));
   // Весь лес за стеной заражён: terrain красит 3D-инстансы и дальние карточки.
   terrain.infectionAt = (x, z) => zone.isOutside(x, z);
   refreshInfection(terrain);
@@ -90,7 +92,9 @@ export function createStory(ctx) {
   clearBushes(terrain, doomedSpot.x, doomedSpot.z, clearR);
 
   function mount(tree, doomed) {
-    const pos = new BABYLON.Vector3(tree.x, getHeight(tree.x, tree.z) + 2.4, tree.z);
+    // Автоматические камеры не прячем в листве: держим их ниже кроны.
+    // Ручная установка по подсказке на стволе остаётся на выбранной высоте.
+    const pos = new BABYLON.Vector3(tree.x, getHeight(tree.x, tree.z) + 1.2, tree.z);
     // Нормаль — к дому: камера смотрит ОТ ствола в лес (в заражённую зону).
     const n = new BABYLON.Vector3(HOUSE_POS.x - tree.x, 0, HOUSE_POS.z - tree.z).normalize();
     buildCamera(pos, n);
@@ -326,7 +330,7 @@ export function createStory(ctx) {
     pokeBaseY = remainsPos.y;
     pokeArrow.position.y = pokeBaseY + 0.45;
     pokeArrow.rotation.set(Math.PI / 2, 0.6, 0);
-    toast("Вы ковыряете слизь стрелой…");
+    toast(t("Вы ковыряете слизь стрелой…"));
     return true;
   }
 
@@ -337,7 +341,7 @@ export function createStory(ctx) {
     state.resinTaken = true;
     held.setEnabled(true);
     drips.start();
-    toast("Смола на стреле. Похоже, она растворяет всё, кроме дерева.");
+    toast(t("Смола на стреле. Похоже, она растворяет всё, кроме дерева."));
     mgr.toastT = 6;
     hud();
   }
@@ -383,11 +387,14 @@ export function createStory(ctx) {
     "gap:16px", "background:rgba(0,0,0,.92)", "color:#eee",
     "font:22px monospace", "text-align:center",
   ].join(";");
-  end.innerHTML = `<div style="font-size:32px;color:#9f4">ШАХТА ПРОЙДЕНА</div>
-    <div>Вы выбрались из-под земли, пока лес наверху поглощала кислота.</div>
-    <button id="storyRestart" style="pointer-events:auto;font:18px monospace;padding:10px 24px;cursor:pointer">Начать заново</button>`;
+  function renderEnd() {
+    end.innerHTML = `<div style="font-size:32px;color:#9f4">${t("ШАХТА ПРОЙДЕНА")}</div>
+      <div>${t("Вы выбрались из-под земли, пока лес наверху поглощала кислота.")}</div>
+      <button id="storyRestart" style="pointer-events:auto;font:18px monospace;padding:10px 24px;cursor:pointer">${t("Начать заново")}</button>`;
+    end.querySelector("#storyRestart").onclick = () => location.reload();
+  }
+  renderEnd();
   document.body.appendChild(end);
-  end.querySelector("#storyRestart").onclick = () => location.reload();
 
   const STEPS = [
     { title: "Посмотрите монитор",
@@ -413,12 +420,13 @@ export function createStory(ctx) {
   function renderPanel() {
     const s = STEPS[state.index];
     if (!s) return;
-    panel.innerHTML = `<div style="font-size:11px;color:#9b9;letter-spacing:2px">НОВАЯ ЦЕЛЬ · ${state.index + 1}/${STEPS.length}</div>
-      <div style="font-size:17px;color:#fff;margin:3px 0">${s.title}</div>
-      <div>${s.text}</div>`;
+    panel.innerHTML = `<div style="font-size:11px;color:#9b9;letter-spacing:2px">${t("НОВАЯ ЦЕЛЬ · {n}/{m}", { n: state.index + 1, m: STEPS.length })}</div>
+      <div style="font-size:17px;color:#fff;margin:3px 0">${t(s.title)}</div>
+      <div>${t(s.text)}</div>`;
   }
   renderPanel();
-  toast("Грохот в лесу… зелёная стена уже близко");
+  onLangChange(() => { renderPanel(); renderEnd(); });
+  toast(t("Грохот в лесу… зелёная стена уже близко"));
 
   function advance() {
     state.index++;
@@ -444,6 +452,8 @@ export function createStory(ctx) {
     },
     // Монитор показывает «нет сигнала» для камеры, которую съела кислота.
     feedBroken(cam) { return cam === doomed.root; },
+    // Находится ли камера за стеной заражения — фид тогда видит зелёное небо.
+    zoneOutside(x, z) { return zone.isOutside(x, z); },
     // Куда ведёт жёлтая стрелка: монитор → камера/остатки → решётка.
     navTarget() {
       if (state.completed || state.melting || state.inMine) return null;
@@ -461,7 +471,7 @@ export function createStory(ctx) {
       drips.emitRate = 120;
       drips.minSize = 0.025; drips.maxSize = 0.06;
       drips.minLifeTime = 0.55; drips.maxLifeTime = 1.05;
-      toast("Вы проводите смолой над решёткой…");
+      toast(t("Вы проводите смолой над решёткой…"));
       hud();
       return true;
     },
@@ -566,7 +576,7 @@ export function createStory(ctx) {
           drips.minSize = 0.015; drips.maxSize = 0.035;
           drips.minLifeTime = 0.35; drips.maxLifeTime = 0.8;
           drips.stop();
-          toast("Решётка провалилась — проход в яму открыт");
+          toast(t("Решётка провалилась — проход в яму открыт"));
         }
       }
 

@@ -2,17 +2,21 @@
 // Управление: WASD+мышь (pointer lock), Space, ЛКМ — лук, E — дверь/камеры/монитор, Esc — пауза/выход.
 import * as BABYLON from "@babylonjs/core";
 import "@babylonjs/loaders";
-import { initTerrain, updateTerrain, cullTerrainChunks, pushOutOfTrees, CHUNK_WORLD } from "./terrain.js";
+import { initTerrain, updateTerrain, cullTerrainChunks, pushOutOfTrees, updateInfected, CHUNK_WORLD } from "./terrain.js";
 import { buildHouse, updateDoor, buildPit, buildCave, breakGlass,
-  buildCampfire, updateCampfire, campfireInteract, COOK_TIME } from "./world.js";
+  buildCampfire, updateCampfire, campfireInteract, COOK_TIME, HOUSE } from "./world.js";
 import { createPlayer, updatePlayer, damagePlayer, createBow, updateBow, shootArrow,
   updateArrows, arrows, spawnMeat, updateMeats, spawnAnimal, updateAnimals, animals,
   pickKind, createCamManager, registerCamera, removeCamera, meats, damageAnimal,
-  updateResins, resins } from "./entities.js";
+  updateResins, resins, getFireTexture, burstAt } from "./entities.js";
 import { getHeight } from "./noise.js";
 import { createTestScenes } from "./testScenes.js";
 import { createStory } from "./story.js";
 import { createMine } from "./mine.js";
+import { t, getLang, setLang, initI18n, onLangChange } from "./i18n.js";
+
+// Язык определяется на старте (SDK Яндекс Игр / браузер), пока видна заставка.
+initI18n();
 
 const canvas = document.getElementById("renderCanvas");
 const engine = new BABYLON.Engine(canvas, true);
@@ -37,11 +41,30 @@ camera.fov = 75 * Math.PI / 180;
 camera.minZ = 0.05;
 
 const terrain = initTerrain(scene);
-const { door, glass, screen, screenMat, lamp } = buildHouse(scene);
+const { door, glass, screen, screenMat, lamp, roof, roofMat,
+  walls, wallMats, wood, woodMats } = buildHouse(scene);
 const pit = buildPit(scene);
 const cave = buildCave(scene);
 const campfire = buildCampfire(scene);
 const player = createPlayer(scene, camera);
+// Огонь на игроке: включается, когда он заходит в костёр, и гаснет через
+// пару секунд после выхода (горение продолжается по времени).
+const burnParticles = new BABYLON.ParticleSystem("playerBurn", 90, scene);
+burnParticles.particleTexture = getFireTexture(scene);
+burnParticles.emitter = player.mesh;
+burnParticles.minEmitBox = new BABYLON.Vector3(-0.2, 0, -0.2);
+burnParticles.maxEmitBox = new BABYLON.Vector3(0.2, 0.9, 0.2);
+burnParticles.color1 = new BABYLON.Color4(1, 0.9, 0.3, 0.95);
+burnParticles.color2 = new BABYLON.Color4(1, 0.35, 0.03, 0.8);
+burnParticles.colorDead = new BABYLON.Color4(0.4, 0.08, 0, 0);
+burnParticles.minLifeTime = 0.25; burnParticles.maxLifeTime = 0.6;
+burnParticles.minSize = 0.06; burnParticles.maxSize = 0.18;
+burnParticles.direction1 = new BABYLON.Vector3(-0.15, 0.8, -0.15);
+burnParticles.direction2 = new BABYLON.Vector3(0.15, 1.6, 0.15);
+burnParticles.minEmitPower = 0.3; burnParticles.maxEmitPower = 0.9;
+burnParticles.gravity = new BABYLON.Vector3(0, 1.5, 0);
+burnParticles.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
+burnParticles.emitRate = 46;
 const bow = createBow(scene, camera);
 const mgr = createCamManager(scene);
 mgr.screenMode = "off"; // off | ready (светится) | on (фид в режиме монитора)
@@ -55,6 +78,32 @@ feedCam.fov = 110 * Math.PI / 180;
 feedCam.minZ = 0.05; // камера почти на земле: minZ=1 срезал низ кадра до clearColor
 feedCam.layerMask = 0x0FFFFFFF & ~0x2; // без слоя игрока (как cull_mask без layer2)
 feedRT.activeCamera = feedCam;
+// Камера в опасной зоне видит зелёное небо даже когда игрок в безопасности.
+// Цвет фона и тумана подменяем только на время рендера фида.
+const FEED_SKY_ACID = new BABYLON.Color3(0.10, 0.24, 0.06);
+const feedSavedFog = new BABYLON.Color3();
+let feedOutside = false;
+const setFeedMatsFog = (c) => {
+  for (const m of [terrain.treeMat, terrain.bushMat, terrain.infTreeMat, terrain.infBushMat]) {
+    m?.setColor3?.("vFogColor", c);
+  }
+};
+feedRT.onBeforeRenderObservable.add(() => {
+  if (!feedOutside) return;
+  feedSavedFog.copyFrom(scene.fogColor);
+  scene.fogColor.copyFrom(FEED_SKY_ACID);
+  setFeedMatsFog(FEED_SKY_ACID);
+});
+feedRT.onAfterRenderObservable.add(() => {
+  if (!feedOutside) return;
+  scene.fogColor.copyFrom(feedSavedFog);
+  setFeedMatsFog(feedSavedFog);
+});
+function setFeedSky(outside) {
+  feedOutside = outside;
+  const c = outside ? FEED_SKY_ACID : scene.fogColor;
+  feedRT.clearColor.set(c.r, c.g, c.b, 1);
+}
 // RenderTargetTexture без renderList рендерит scene.getActiveMeshes() — набор,
 // посчитанный для scene.activeCamera (игрок): на фиде оказывался только сектор,
 // совпадающий с конусом взгляда игрока, остальной кадр — clearColor.
@@ -102,6 +151,7 @@ camAimDisc.setEnabled(false);
 camAimDisc.rotationQuaternion = new BABYLON.Quaternion();
 const camAimQ = new BABYLON.Quaternion();
 const _camAimUp = new BABYLON.Vector3(0, 1, 0);
+const camMarkPos = new BABYLON.Vector3();
 mgr.feedRT = feedRT; mgr.feedCam = feedCam;
 
 const input = { f: false, b: false, l: false, r: false, jump: false };
@@ -118,16 +168,28 @@ window.addEventListener("error", (e) => {
   b.textContent = "ERR: " + (e.message || e.error);
 });
 function hud() {
-  $("stats").innerHTML = `Здоровье: ${Math.ceil(player.st.hp)}<br>Мясо: ${player.st.meat}`
-    + (player.st.resin ? "<br>Смола: есть" : "");
-  $("camCount").textContent = `Камеры: ${mgr.list.length} / 5`;
+  $("stats").innerHTML = t("Здоровье: {hp}<br>Мясо: {meat}",
+    { hp: Math.ceil(player.st.hp), meat: player.st.meat })
+    + (player.st.resin ? "<br>" + t("Смола: есть") : "");
+  $("camCount").textContent = t("Камеры: {n} / 5", { n: mgr.list.length });
 }
 hud();
+// applyStatic подставляет стартовые значения — после смены языка возвращаем реальные
+onLangChange(() => hud());
 function toast(msg) {
   $("toast").textContent = msg;
   $("toast").style.display = "block";
   mgr.toastT = 2;
 }
+let achT = 0, achKey = null;
+function showAchievement(nameRu) {
+  achKey = nameRu;
+  $("achName").textContent = t(nameRu);
+  $("achievement").style.display = "block";
+  clearTimeout(achT);
+  achT = setTimeout(() => { $("achievement").style.display = "none"; }, 4200);
+}
+onLangChange(() => { if (achKey) $("achName").textContent = t(achKey); });
 
 // ---------- дешёвые проверки: не гонять луч/свет/частицы, пока они не нужны ----------
 function setLight(light, on) {
@@ -207,9 +269,9 @@ addEventListener("keydown", (e) => {
     else onInteract();
   }
   if (mgr.monitorActive) {
-    if (e.code === "KeyC") stepCam(1);
-    if (e.code === "KeyX") stepCam(-1);
-    if (e.code === "KeyM") toggleMark();
+    if (e.code === "KeyC") { stepCam(1); monitorDid("switch"); }
+    if (e.code === "KeyX") { stepCam(-1); monitorDid("switch"); }
+    if (e.code === "KeyM") { toggleMark(); if (mgr.marked >= 0) monitorDid("mark"); }
   }
   if (e.code === "Escape") {
     if (mgr.monitorActive) exitMonitor();
@@ -285,9 +347,9 @@ function stepCam(d) {
 }
 function toggleMark() {
   mgr.marked = mgr.marked === mgr.active ? -1 : mgr.active;
-  const t = $("toast");
-  t.textContent = mgr.marked >= 0 ? "Метка поставлена" : "Метка снята";
-  t.style.display = "block";
+  const box = $("toast");
+  box.textContent = mgr.marked >= 0 ? t("Метка поставлена") : t("Метка снята");
+  box.style.display = "block";
   mgr.toastT = 2;
 }
 
@@ -335,42 +397,246 @@ function buildCamera(point, normal) {
   const id = `${Date.now() % 100000}_${camSeq++}`;
   const root = new BABYLON.TransformNode(`SecurityCam_${id}`, scene);
   const n = normal;
-  root.position = point.add(n.scale(0.03));
+  // Ставим ровно туда, куда указывает кружок-подсказка: без ограничения высоты.
+  // Модель чуть вынесена из ствола уже внутри дочернего узла, чтобы корень
+  // совпадал с точкой прицела и камера была видна.
+  root.position = point.add(n.scale(0.02));
   // Камера смотрит ОТ ствола: линза и взгляд монитора идут по локальной -Z
   // модели, поэтому базис z = -горизонтальной нормали ствола (а не вслед за
   // взглядом игрока — тот смотрел в ствол). Нормаль у боковой грани цилиндра
   // почти горизонтальна (постановка требует |ny| < 0.6).
   const z = new BABYLON.Vector3(-n.x, 0, -n.z).normalize();
   root.rotation.y = Math.atan2(z.x, z.z);
+  // Масштаб модели задаём дочерним узлом: story-растворение меняет scaling
+  // самого root и не должно сбрасывать наш базовый размер.
+  const model = new BABYLON.TransformNode(`camModel_${id}`, scene);
+  model.parent = root;
+  model.scaling.setAll(2.2); // модель с ручной установки, только заметнее
+  // Локальный -Z смотрит от ствола к игроку — выносим модель наружу, не сдвигая root.
+  model.position.z = -0.2;
   const bodyMat = new BABYLON.StandardMaterial("camBody", scene);
   bodyMat.diffuseColor = new BABYLON.Color3(0.15, 0.15, 0.17);
   const body = BABYLON.MeshBuilder.CreateBox("cambody", { width: 0.08, height: 0.05, depth: 0.12 }, scene);
-  body.parent = root; body.material = bodyMat; body.layerMask = 0x2;
+  body.parent = model; body.material = bodyMat; body.layerMask = 0x2;
   body.metadata = { kind: "seccam", root };
   body.isPickable = true;
-  const lens = BABYLON.MeshBuilder.CreateCylinder("camlens", { diameter: 0.03, height: 0.02 }, scene);
-  lens.parent = root; lens.position.z = -0.07; lens.rotation.x = Math.PI / 2; lens.layerMask = 0x2;
+  // Кронштейн к стволу — читается как «прикрученная» камера, а не чёрный кубик.
+  const bracket = BABYLON.MeshBuilder.CreateBox("cambase",
+    { width: 0.1, height: 0.02, depth: 0.07 }, scene);
+  bracket.parent = model; bracket.position.z = 0.07;
+  bracket.material = bodyMat; bracket.layerMask = 0x2; bracket.isPickable = false;
+  const lens = BABYLON.MeshBuilder.CreateCylinder("camlens", { diameter: 0.035, height: 0.025 }, scene);
+  lens.parent = model; lens.position.z = -0.075; lens.rotation.x = Math.PI / 2; lens.layerMask = 0x2;
   lens.metadata = { kind: "seccam", root };
-  const led = BABYLON.MeshBuilder.CreateSphere("camled", { diameter: 0.015 }, scene);
-  led.parent = root; led.position.set(0.03, 0.03, 0); led.layerMask = 0x2;
+  const led = BABYLON.MeshBuilder.CreateSphere("camled", { diameter: 0.02 }, scene);
+  led.parent = model; led.position.set(0.03, 0.03, -0.03); led.layerMask = 0x2;
   const ledMat = new BABYLON.StandardMaterial("ledMat", scene);
   ledMat.emissiveColor = new BABYLON.Color3(1, 0, 0);
   led.material = ledMat;
+  root.ledMat = ledMat; // подсветка помеченной камеры
   registerCamera(mgr, scene, root);
   hud();
+}
+// Попадание стрелы в камеру: убираем её из списка, взрыв, вспышка света.
+function explodeCamera(root, pos) {
+  if (!root || root.isDisposed()) return;
+  if (mgr.list[mgr.marked] === root) mgr.marked = -1;
+  removeCamera(mgr, root);
+  burstAt(scene, pos, getFireTexture(scene), 70);
+  const flash = new BABYLON.PointLight("camBoom", pos, scene);
+  flash.diffuse = new BABYLON.Color3(1, 0.55, 0.15);
+  flash.intensity = 4; flash.range = 9;
+  setTimeout(() => flash.dispose(), 280);
+  root.dispose();
+  hud();
+  toast(t("Камера взорвалась!"));
+}
+// ---------- Горящий дом: огонь НА крыше, обгорелая древесина, обрушение ----------
+let houseFire = null;
+const ROOF_HIDE_AT = [6, 4.5, 7, 8, 8]; // roofBack, roofFront, ridge + панели
+const CHAR_COLOR = new BABYLON.Color3(0.07, 0.06, 0.05);
+// Пол намеренно исключён; все остальные деревянные детали дома горят.
+const BURN_PARTS = [...roof, ...walls, ...wood];
+const BURN_MATS = [roofMat, ...wallMats, ...woodMats];
+const HIDE_AT = BURN_PARTS.map((_, i) =>
+  i < roof.length ? ROOF_HIDE_AT[i] : 8.5 + (i - roof.length) * 0.35);
+const HOUSE_DONE_AT = Math.max(...HIDE_AT);
+function igniteHouse(pos) {
+  if (houseFire) return; // один пожар за раз
+  const tex = getFireTexture(scene);
+  const bases = BURN_MATS.map((m) => m.diffuseColor.clone());
+  const center = new BABYLON.Vector3(HOUSE.x, getHeight(HOUSE.x, HOUSE.z) + 3.0, HOUSE.z);
+  const systems = [];
+  const make = (name, emitter, rate, colors, smoke, box) => {
+    const ps = new BABYLON.ParticleSystem(name, smoke ? 90 : 140, scene);
+    ps.particleTexture = tex;
+    ps.emitter = emitter;
+    ps.minEmitBox = new BABYLON.Vector3(-box, 0, -box);
+    ps.maxEmitBox = new BABYLON.Vector3(box, 0.3, box);
+    ps.color1 = colors[0]; ps.color2 = colors[1]; ps.colorDead = colors[2];
+    ps.minLifeTime = smoke ? 1.6 : 0.3; ps.maxLifeTime = smoke ? 3 : 0.7;
+    ps.minSize = smoke ? 0.2 : 0.1; ps.maxSize = smoke ? 0.7 : 0.36;
+    ps.direction1 = new BABYLON.Vector3(-0.3, 1, -0.3);
+    ps.direction2 = new BABYLON.Vector3(0.3, 2, 0.3);
+    ps.minEmitPower = 0.4; ps.maxEmitPower = 1.4;
+    ps.gravity = new BABYLON.Vector3(0, smoke ? 0.4 : 1, 0);
+    ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
+    ps.emitRate = rate;
+    ps.start();
+    systems.push(ps);
+  };
+  // Огонь на КАЖДОМ горящем элементе — крыше и стенах (но не на полу).
+  for (const p of BURN_PARTS) {
+    make("houseFirePart", p.getAbsolutePosition().add(new BABYLON.Vector3(0, 0.15, 0)), 48, [
+      new BABYLON.Color4(1, 0.9, 0.35, 1),
+      new BABYLON.Color4(1, 0.35, 0.03, 0.9),
+      new BABYLON.Color4(0.4, 0.08, 0, 0),
+    ], false, 0.8);
+  }
+  make("houseSmoke", center.add(new BABYLON.Vector3(0, 1.1, 0)), 16, [
+    new BABYLON.Color4(0.4, 0.4, 0.4, 0.75),
+    new BABYLON.Color4(0.24, 0.24, 0.24, 0.6),
+    new BABYLON.Color4(0.16, 0.16, 0.16, 0),
+  ], true, 1.2);
+  // По два языка пламени на каждый горящий элемент, снаружи стены/крыши.
+  const flameMat = new BABYLON.StandardMaterial("houseFlameMat", scene);
+  flameMat.diffuseColor = BABYLON.Color3.Black();
+  flameMat.emissiveColor = new BABYLON.Color3(1, 0.4, 0.05);
+  flameMat.alpha = 0.86; flameMat.backFaceCulling = false;
+  const flames = [];
+  for (const p of BURN_PARTS) {
+    const at = p.getAbsolutePosition();
+    const out = new BABYLON.Vector3(at.x - HOUSE.x, 0, at.z - HOUSE.z);
+    if (out.lengthSquared() > 1e-4) out.normalize(); else out.set(0, 0, 1);
+    for (let k = 0; k < 2; k++) {
+      const f = BABYLON.MeshBuilder.CreateCylinder("houseFlame",
+        { diameterTop: 0, diameterBottom: 0.55, height: 0.95, tessellation: 9 }, scene);
+      f.material = flameMat;
+      f.billboardMode = BABYLON.Mesh.BILLBOARDMODE_Y;
+      f.position.copyFrom(at).addInPlace(out.scale(k ? 0.34 : -0.18));
+      f.position.y += 0.42;
+      f.isPickable = false;
+      flames.push(f);
+    }
+  }
+  const light = new BABYLON.PointLight("houseFireLight", center, scene);
+  light.diffuse = new BABYLON.Color3(1, 0.45, 0.1);
+  light.range = 16; light.intensity = 3.5;
+  houseFire = { t: 0, done: false, systems, light, parts: BURN_PARTS, mats: BURN_MATS,
+    bases, flames, flameMat, hidden: BURN_PARTS.map(() => false), pos, glassDone: false };
+  $("houseTask").style.display = "block";
+  $("houseTask").classList.remove("done", "pop");
+  $("houseTaskDone").style.display = "none";
+  toast(t("Дом загорелся!"));
+  burstAt(scene, pos, tex, 40);
+}
+
+function resetHouseFire() {
+  if (houseFire) {
+    const hf = houseFire;
+    for (const ps of hf.systems) { ps.stop(); ps.dispose(); }
+    hf.light.dispose();
+    for (const f of hf.flames) f.dispose();
+    hf.flameMat.dispose();
+    for (const p of hf.parts) p.setEnabled(true);
+    for (let i = 0; i < hf.mats.length; i++) {
+      hf.mats[i].diffuseColor.copyFrom(hf.bases[i]);
+      hf.mats[i].emissiveColor.set(0, 0, 0);
+    }
+    houseFire = null;
+  }
+  $("houseTask").style.display = "none";
+  $("houseTask").classList.remove("done", "pop");
+  $("houseTaskDone").style.display = "none";
+}
+
+function updateHouseFire(dt, now) {
+  if (!houseFire) return;
+  const hf = houseFire;
+  hf.t += dt;
+  const flick = 0.75 + 0.25 * Math.sin(now * 0.019);
+  hf.light.intensity = 3.5 * flick;
+  const k = Math.min(1, hf.t / HOUSE_DONE_AT);
+  // Древесина обугливается, а не просто светится оранжевым (пол не трогаем).
+  for (let i = 0; i < hf.mats.length; i++) {
+    BABYLON.Color3.LerpToRef(hf.bases[i], CHAR_COLOR, k, hf.mats[i].diffuseColor);
+    if (hf.mats[i].emissiveColor) hf.mats[i].emissiveColor.set(0.12 * k, 0.05 * k, 0.01 * k);
+  }
+  hf.flameMat.emissiveColor.set(flick, 0.4 * flick, 0.05 * flick);
+  for (let i = 0; i < hf.flames.length; i++) {
+    const f = hf.flames[i];
+    if (!f.isEnabled()) continue;
+    const part = hf.parts[Math.floor(i / 2)];
+    const s = 0.7 + 0.35 * Math.sin(now * 11 + i * 2.1);
+    f.scaling.set(0.85 + 0.2 * s, 0.75 + 0.7 * s, 0.85 + 0.2 * s);
+    f.position.y = part.getAbsolutePosition().y + 0.35 + 0.08 * Math.sin(now * 7 + i);
+  }
+  // Жар разбивает окно: стекло сыплется, когда огонь доходит до стены.
+  if (!hf.glassDone && hf.t >= 2.5) {
+    hf.glassDone = true;
+    if (glass && !glass.broken) breakGlass(scene, glass);
+    burstAt(scene,
+      new BABYLON.Vector3(HOUSE.x - 2.31, getHeight(HOUSE.x, HOUSE.z) + 1.775, HOUSE.z),
+      getFireTexture(scene), 28);
+  }
+  // Элементы проваливаются по очереди, с вспышкой искр на месте обрушения.
+  for (let i = 0; i < hf.parts.length; i++) {
+    if (hf.hidden[i] || hf.t < HIDE_AT[i]) continue;
+    hf.hidden[i] = true;
+    burstAt(scene, hf.parts[i].getAbsolutePosition(), getFireTexture(scene), 30);
+    hf.parts[i].setEnabled(false);
+    hf.flames[i * 2]?.setEnabled(false);
+    hf.flames[i * 2 + 1]?.setEnabled(false);
+    hf.systems[i]?.stop();
+  }
+  if (!hf.done && hf.t >= HOUSE_DONE_AT) {
+    hf.done = true;
+    hf.light.intensity = 0.5;
+    $("houseTask").classList.add("done", "pop");
+    $("houseTaskDone").style.display = "block";
+    setTimeout(() => { if (houseFire === hf) $("houseTaskDone").style.display = "none"; }, 4500);
+    toast(t("Крыша сгорела!"));
+  }
+  if (hf.done) {
+    for (let i = 0; i < hf.parts.length; i++) hf.systems[i]?.stop();
+    if (hf.t >= HOUSE_DONE_AT + 6) {
+      hf.systems[hf.parts.length]?.stop();
+      hf.light.intensity = 0;
+    }
+  }
+}
+
+// Обучение в мониторе: подсвечиваем клавиши по шагам — переключение камер,
+// поворот, метка, выход. Выполненный шаг зачёркивается и гаснет.
+const MONITOR_STEPS = ["switch", "rotate", "mark", "exit"];
+let monitorStep = 0;
+function updateMonitorHelp() {
+  $("monitorHelp").querySelectorAll(".mh-row").forEach((row, i) => {
+    row.classList.toggle("active", i === monitorStep);
+    row.classList.toggle("done", i < monitorStep);
+    row.classList.toggle("idle", i > monitorStep);
+  });
+}
+function monitorDid(stage) {
+  if (!mgr.monitorActive || MONITOR_STEPS[monitorStep] !== stage) return;
+  monitorStep++;
+  updateMonitorHelp();
 }
 function enterMonitor() {
   if (mgr.monitorActive || !mgr.list.length) return;
   mgr.monitorActive = true;
   mgr.yaw = 0; mgr.pitch = 0;
+  monitorStep = 0;
   document.exitPointerLock?.();
   $("camLabel").style.display = "block";
   $("monitorHelp").style.display = "block";
+  updateMonitorHelp();
   updateLockHint();
 }
 function exitMonitor() {
   mgr.monitorActive = false;
   mgr.yaw = 0; mgr.pitch = 0;
+  monitorStep = 0;
   $("camLabel").style.display = "none";
   $("monitorHelp").style.display = "none";
   lockPointer();
@@ -403,7 +669,7 @@ function drawBrokenFeed() {
   g.fillStyle = "rgba(190,255,160,.92)";
   g.font = "bold 20px monospace";
   g.textAlign = "center";
-  g.fillText("НЕТ СИГНАЛА", 128, 78);
+  g.fillText(t("НЕТ СИГНАЛА"), 128, 78);
   brokenTex.update();
 }
 function setScreenBroken() {
@@ -447,7 +713,11 @@ $("btnContinue").onclick = () => togglePause(false);
 $("btnRestart").onclick = () => {
   inCave = false; falling = false; fadeT = -1;
   player.mesh.position.copyFrom(player.st.spawn);
-  player.st.hp = 100; hud();
+  player.st.hp = 100; player.st.burnT = 0; player.st.burnTick = 0;
+  burnParticles.stop(); $("burnFlash").style.opacity = "0";
+  $("burnLabel").style.display = "none";
+  resetHouseFire();
+  hud();
   togglePause(false);
 };
 $("btnStart").onclick = () => {
@@ -455,6 +725,9 @@ $("btnStart").onclick = () => {
   $("start").style.display = "none";
   lockPointer();
 };
+// Ручное переключение языка — только на время сессии, чтобы автоопределение
+// через SDK Яндекс Игр всегда оставалось приоритетным при следующем запуске.
+$("langBtn").onclick = () => setLang(getLang() === "ru" ? "en" : "ru");
 $("pause").style.display = "none";
 
 // ---------- изолированные сцены ручного тестирования (?scene=...) ----------
@@ -473,6 +746,10 @@ const testScenes = new URLSearchParams(location.search).has("scene")
         input.f = input.b = input.l = input.r = input.jump = false;
         bow.drawing = false; bow.timer = 0;
         player.st.flash = 0;
+        player.st.burnT = 0; player.st.burnTick = 0;
+        burnParticles.stop(); $("burnFlash").style.opacity = "0";
+        $("burnLabel").style.display = "none";
+        resetHouseFire();
         $("dmgFlash").style.opacity = "0";
       },
     })
@@ -487,16 +764,30 @@ const mine = testScenes ? null : createMine({
   scene, camera, player, toast,
   onFinish: () => { if (story) story.finishMine(); },
 });
+const initialLoads = []; // .glb стартовых зверей — ждём их до снятия экрана загрузки
 if (story) {
   // Здоровье не полное: мясо и костёр становятся необходимыми, а не декором.
   player.st.hp = 55;
   hud();
   // Рядом с домом: кролики на еду и хищники, которые реально опасны.
-  spawnAnimal(scene, "rabbit", new BABYLON.Vector3(-13, getHeight(-13, -13) + 0.5, -13));
-  spawnAnimal(scene, "rabbit", new BABYLON.Vector3(-4, getHeight(-4, -17) + 0.5, -17));
-  spawnAnimal(scene, "fox", new BABYLON.Vector3(9, getHeight(9, -14) + 0.5, -14));
-  spawnAnimal(scene, "wolf", new BABYLON.Vector3(-16, getHeight(-16, 3) + 0.5, 3));
+  initialLoads.push(
+    spawnAnimal(scene, "rabbit", new BABYLON.Vector3(-13, getHeight(-13, -13) + 0.5, -13)),
+    spawnAnimal(scene, "rabbit", new BABYLON.Vector3(-4, getHeight(-4, -17) + 0.5, -17)),
+    spawnAnimal(scene, "fox", new BABYLON.Vector3(9, getHeight(9, -14) + 0.5, -14)),
+    spawnAnimal(scene, "wolf", new BABYLON.Vector3(-16, getHeight(-16, 3) + 0.5, 3)),
+  );
 }
+
+// ---------- экран загрузки ----------
+const loadEl = $("loading");
+let loadTarget = 0.04, loadStage = "Запуск…";
+function setLoad(p, ru) {
+  if (p > loadTarget) loadTarget = p;
+  $("loadBar").style.width = (loadTarget * 100).toFixed(1) + "%";
+  $("loadPct").textContent = Math.round(loadTarget * 100) + "%";
+  if (ru) { loadStage = ru; $("loadText").textContent = t(ru); }
+}
+onLangChange(() => { $("loadText").textContent = t(loadStage); });
 
 // ---------- цикл ----------
 let last = performance.now();
@@ -507,6 +798,7 @@ engine.runRenderLoop(() => {
   const raw = (now - last) / 1000;
   const dt = Math.min(0.05, raw);
   last = now;
+  updateInfected(terrain, now / 1000, player.mesh.position);
   if (!started || paused) { scene.render(); return; }
 
   // Монитор как в camera_manager._process: поворот стрелками/WASD 2.0 рад/с,
@@ -519,6 +811,7 @@ engine.runRenderLoop(() => {
     if (input.r) yaw += rot;
     if (input.f) pitch += rot;
     if (input.b) pitch -= rot;
+    if (yaw !== 0 || pitch !== 0) monitorDid("rotate");
     mgr.yaw = clamp(mgr.yaw + yaw, -75 * Math.PI / 180, 75 * Math.PI / 180);
     mgr.pitch = clamp(mgr.pitch + pitch, -85 * Math.PI / 180, 85 * Math.PI / 180);
   }
@@ -535,17 +828,19 @@ engine.runRenderLoop(() => {
     // Камеру разъело кислотой: вместо леса — шум и «НЕТ СИГНАЛА».
     setScreenBroken();
     setFeedEnabled(false);
-    $("camLabel").textContent = `Камера ${mgr.active + 1} — нет сигнала`;
+    $("camLabel").textContent = t("Камера {n} — нет сигнала", { n: mgr.active + 1 });
   } else if (mgr.monitorActive) {
     // Фид существует только внутри режима монитора.
     setScreenOn();
     setFeedEnabled(true);
+    setFeedSky(!!(story?.zoneOutside?.(activeCam.position.x, activeCam.position.z)));
     const yawQ = BABYLON.Quaternion.RotationYawPitchRoll(activeCam.rotation.y + mgr.yaw, mgr.pitch, 0);
     feedDir = new BABYLON.Vector3(0, 0, -1).applyRotationQuaternion(yawQ);
     feedCam.position.copyFrom(activeCam.position);
     feedCam.setTarget(activeCam.position.add(feedDir));
-    const mark = mgr.marked === mgr.active ? " — метка" : "";
-    $("camLabel").textContent = `Камера ${mgr.active + 1} из ${mgr.list.length}${mark}`;
+    const mark = mgr.marked === mgr.active ? t(" — метка") : "";
+    $("camLabel").textContent = t("Камера {n} из {m}{mark}",
+      { n: mgr.active + 1, m: mgr.list.length, mark });
   } else {
     // Камеры есть, но мы снаружи: экран светится, фид не рендерится,
     // земля вокруг камеры не догружается.
@@ -609,6 +904,27 @@ engine.runRenderLoop(() => {
   const nearFire = BABYLON.Vector3.DistanceSquared(pp, campfire.pos) < 25 * 25;
   const lookingAtCampfire = BABYLON.Vector3.DistanceSquared(camera.position, campfire.pos) < 30
     && !!rayFromCam(4.5, (m) => m.metadata?.kind === "campfire").pickedMesh;
+  // Горение в костре: в огне поджигаем заново, после выхода пламя держится
+  // ещё ~2.2 с и каждые 0.5 с снимает 4 HP.
+  const fireDx = pp.x - campfire.pos.x, fireDz = pp.z - campfire.pos.z;
+  const inFire = fireDx * fireDx + fireDz * fireDz < 1.0 * 1.0
+    && pp.y > campfire.pos.y - 0.5 && pp.y < campfire.pos.y + 1.5;
+  if (inFire && player.st.burnT <= 0) toast(t("Вы загорелись!"));
+  if (inFire) player.st.burnT = 2.2;
+  if (player.st.burnT > 0) {
+    player.st.burnT = Math.max(0, player.st.burnT - raw);
+    player.st.burnTick -= raw;
+    if (player.st.burnTick <= 0) {
+      player.st.burnTick = 0.5;
+      damagePlayer(player, 4, hud, false);
+    }
+  } else player.st.burnTick = 0;
+  if (player.st.burnT > 0 && !burnParticles.isStarted()) burnParticles.start();
+  else if (player.st.burnT <= 0 && burnParticles.isStarted()) burnParticles.stop();
+  const burning = player.st.burnT > 0;
+  $("burnFlash").style.opacity = burning
+    ? (0.42 + 0.18 * Math.sin(now * 0.018)).toFixed(3) : "0";
+  $("burnLabel").style.display = burning ? "block" : "none";
   // Визуальная подсказка прямо на стволе: светящийся кружок в точке крепления.
   const treeHit = !mgr.monitorActive && treeNear(camera.position, 6)
     ? rayFromCam(5, (m) => m.metadata?.kind === "tree") : null;
@@ -624,19 +940,19 @@ engine.runRenderLoop(() => {
     camAimDisc.setEnabled(true);
   } else camAimDisc.setEnabled(false);
   if (mgr.monitorActive) $("hint").textContent = "";
-  else if (story && story.pokeHint()) $("hint").textContent = "E — поковырять слизь стрелой";
-  else if (story && story.grateHint()) $("hint").textContent = "E — расплавить решётку смолой";
-  else if (lookingAtMonitor && mgr.list.length) $("hint").textContent = "E — посмотреть камеры";
+  else if (story && story.pokeHint()) $("hint").textContent = t("E — поковырять слизь стрелой");
+  else if (story && story.grateHint()) $("hint").textContent = t("E — расплавить решётку смолой");
+  else if (lookingAtMonitor && mgr.list.length) $("hint").textContent = t("E — посмотреть камеры");
   else if (lookingAtCampfire) {
     $("hint").textContent = campfire.phase === "cooking"
-      ? `Мясо жарится… ${Math.max(0, Math.ceil(COOK_TIME - campfire.t))}с`
+      ? t("Мясо жарится… {n}с", { n: Math.max(0, Math.ceil(COOK_TIME - campfire.t)) })
       : campfire.phase === "ready"
-        ? "ЛКМ — съесть жареное мясо"
-        : player.st.meat > 0 ? "ЛКМ — пожарить мясо" : "Костёр: нет сырого мяса";
+        ? t("ЛКМ — съесть жареное мясо")
+        : player.st.meat > 0 ? t("ЛКМ — пожарить мясо") : t("Костёр: нет сырого мяса");
   }
-  else if (canHangCamera) $("hint").textContent = "E — повесить камеру на ствол";
-  else if (treeHit?.pickedMesh && mgr.list.length >= 5) $("hint").textContent = "Камеры: 5 / 5";
-  else if (door.near) $("hint").textContent = "E — открыть/закрыть дверь";
+  else if (canHangCamera) $("hint").textContent = t("E — повесить камеру на ствол");
+  else if (treeHit?.pickedMesh && mgr.list.length >= 5) $("hint").textContent = t("Камеры: 5 / 5");
+  else if (door.near) $("hint").textContent = t("E — открыть/закрыть дверь");
   else $("hint").textContent = "";
 
   // Дальние источники света и частицы выключаем: свет участвует в шейдерах
@@ -653,7 +969,9 @@ engine.runRenderLoop(() => {
   setParticles(pit.motes, nearPit);
 
   updateBow(bow, dt);
-  updateArrows(scene, dt, animals, glass, player);
+  updateArrows(scene, dt, animals, glass, player, explodeCamera,
+    (burning, pos) => { if (burning) igniteHouse(pos); },
+    () => showAchievement("Попал в себя!"));
   if (mine) {
     inMine = mine.active;
     if (inMine) mine.update(dt);
@@ -665,7 +983,8 @@ engine.runRenderLoop(() => {
   updateAnimals(scene, dt, player, hud);
   if (story) story.update(dt);
   updateCampfire(campfire, raw);
-  if (campfire.readyFlash) { campfire.readyFlash = false; toast("Жареное мясо готово — тыкни по костру"); }
+  updateHouseFire(dt, now / 1000);
+  if (campfire.readyFlash) { campfire.readyFlash = false; toast(t("Жареное мясо готово — тыкни по костру")); }
 
   // спавн wildlife для монитора: только в режиме монитора, 4-9с, шанс 45%, 3-7м в конусе
   // В тестовых сценах случайные звери не нужны — они портили бы начальное состояние.
@@ -723,7 +1042,23 @@ engine.runRenderLoop(() => {
   const mark = $("targetMark");
   const storyTarget = story ? story.navTarget() : null;
   const markedCam = mgr.marked >= 0 ? mgr.list[mgr.marked] : null;
+  // Диод на самой модели: у помеченной камеры он мигает бирюзовым —
+  // метку «Камера» легко связать с конкретным устройством в мире.
+  for (let i = 0; i < mgr.list.length; i++) {
+    const c = mgr.list[i];
+    if (!c?.ledMat || c.isDisposed()) continue;
+    if (i === mgr.marked) {
+      const p = 0.55 + 0.45 * Math.sin(now * 0.006);
+      c.ledMat.emissiveColor.set(0.2 * p, p, 0.85 * p);
+      c.__wasMarked = true;
+    } else if (c.__wasMarked) {
+      c.ledMat.emissiveColor.set(1, 0, 0);
+      c.__wasMarked = false;
+    }
+  }
   const navTarget = storyTarget || (markedCam ? markedCam.position : null);
+  const W = engine.getRenderWidth(), H = engine.getRenderHeight();
+  const camFwd = camera.getDirection(new BABYLON.Vector3(0, 0, 1));
   if (navTarget && !mgr.monitorActive && !inMine) {
     const to = navTarget.subtract(camera.position); to.y = 0;
     const fwd = camera.getDirection(new BABYLON.Vector3(0, 0, 1)); fwd.y = 0;
@@ -745,8 +1080,6 @@ engine.runRenderLoop(() => {
 
     // Сама цель тоже помечена: пульсирующий ромб висит прямо на объекте,
     // когда он впереди и в кадре. За спиной/за краем экрана метку не рисуем.
-    const W = engine.getRenderWidth(), H = engine.getRenderHeight();
-    const camFwd = camera.getDirection(new BABYLON.Vector3(0, 0, 1));
     const inFront = BABYLON.Vector3.Dot(navTarget.subtract(camera.position), camFwd) > 0;
     const v = BABYLON.Vector3.Project(navTarget, BABYLON.Matrix.Identity(),
       scene.getTransformMatrix(), camera.viewport.toGlobal(W, H));
@@ -759,6 +1092,23 @@ engine.runRenderLoop(() => {
     nav.style.display = "none";
     mark.style.display = "none";
   }
+
+  // Метка на помеченной камере — отдельный бирюзовый кружок с «M», чтобы
+  // не путать её с жёлтым ромбом сюжетной цели. В режиме монитора камеру
+  // не видно (мы смотрим её глазами), поэтому метку там не рисуем.
+  const camMark = $("camMark");
+  if (markedCam && !markedCam.isDisposed() && !mgr.monitorActive && !inMine) {
+    camMarkPos.copyFrom(markedCam.position);
+    camMarkPos.y += 0.7;
+    const inFront = BABYLON.Vector3.Dot(camMarkPos.subtract(camera.position), camFwd) > 0;
+    const v = BABYLON.Vector3.Project(camMarkPos, BABYLON.Matrix.Identity(),
+      scene.getTransformMatrix(), camera.viewport.toGlobal(W, H));
+    if (inFront && v.z > 0 && v.z < 1 && v.x > 48 && v.x < W - 48 && v.y > 22 && v.y < H - 22) {
+      camMark.style.left = Math.round(v.x) + "px";
+      camMark.style.top = Math.round(v.y) + "px";
+      camMark.style.display = "block";
+    } else camMark.style.display = "none";
+  } else camMark.style.display = "none";
 
   // яма: падение в триггер -> fade 0.9с -> вагонетка в шахте (или пещера в тесте)
   if (!inCave && !inMine && !(story && story.grateIntact)) {
@@ -799,8 +1149,38 @@ engine.runRenderLoop(() => {
 });
 addEventListener("resize", () => engine.resize());
 
+// ---------- снятие экрана загрузки ----------
+// Каждый этап ограничен таймаутом: если ресурс «завис», игра всё равно
+// покажется (с фолбэком), а не останется навсегда под заставкой.
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const limited = (p, ms) => Promise.race([p, wait(ms)]).catch(() => {});
+async function runLoading() {
+  try {
+    setLoad(0.12, "Загружаем текстуры…");
+    await limited(scene.whenReadyAsync?.() ?? Promise.resolve(), 8000);
+    setLoad(0.38, "Запекаем лес…");
+    await limited(terrain.ready ?? Promise.resolve(), 8000);
+    setLoad(0.68, "Грузим модели зверей…");
+    await limited(Promise.allSettled(initialLoads), 8000);
+    setLoad(0.92, "Почти готово…");
+    // пара кадров, чтобы всё уже готовое попало в первый видимый кадр.
+    // Ограничиваем и их: в фоновой вкладке rAF может не приходить вовсе.
+    await limited(new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))), 1500);
+    setLoad(1, "Готово");
+  } catch (e) {
+    console.warn("loading:", e);
+  } finally {
+    loadEl.classList.add("hidden");
+    setTimeout(() => {
+      loadEl.style.display = "none";
+      if (!started) $("start").style.display = "flex";
+    }, 450);
+  }
+}
+runLoading();
+
 // Доступ для автотестов Playwright — только с ?test=1, в обычной игре не создаётся.
 if (new URLSearchParams(location.search).has("test")) {
   window.__game = { scene, camera, player, hud, campfire, campfireInteract,
-    damagePlayer, damageAnimal, getHeight, terrain, animals, meats, arrows, testScenes, BABYLON };
+    damagePlayer, damageAnimal, getHeight, terrain, animals, meats, arrows, mgr, testScenes, BABYLON };
 }

@@ -3,6 +3,7 @@ import * as BABYLON from "@babylonjs/core";
 import { getHeight, PIT_CENTER, HOUSE_POS } from "./noise.js";
 import { breakGlass } from "./world.js";
 import { MODELS_BASE } from "./assets.js";
+import { t } from "./i18n.js";
 
 const _down = new BABYLON.Vector3(0, -1, 0);
 const MAX_WALK_SLOPE = 2.0;  // ~63°: круче — уже стена воронки, вверх не пускаем
@@ -56,7 +57,8 @@ export function createPlayer(scene, camera) {
   mesh.metadata = { kind: "player" };
   mesh.layerMask = 0x2; // невидим для фид-камеры (как cull_mask без layer2)
   const st = { vel: new BABYLON.Vector3(0, 0, 0), hp: 100, meat: 0, grounded: false,
-    spawn: mesh.position.clone(), yaw: 2.4, pitch: 0, flash: 0 };
+    spawn: mesh.position.clone(), yaw: 2.4, pitch: 0, flash: 0,
+    burnT: 0, burnTick: 0 }; // горение в костре
   return { mesh, st };
 }
 
@@ -194,6 +196,8 @@ export function damagePlayer(player, amount, hud, flash = true) {
     player.st.vel.set(0, 0, 0);
     player.st.hp = 100;
     player.st.flash = 0; // после смерти экран снова чистый
+    player.st.burnT = 0; // и горение сбрасываем — иначе респавн сразу загорится
+    player.st.burnTick = 0;
   }
   hud();
 }
@@ -318,6 +322,44 @@ export function updateBow(bow, dt) {
   }
 }
 
+// ---------- Огонь: общая текстура частицы и короткий взрыв ----------
+let fireTex = null;
+export function getFireTexture(scene) {
+  if (fireTex && fireTex.getScene?.() === scene) return fireTex;
+  fireTex = new BABYLON.DynamicTexture("fireParticle", 32, scene, false);
+  const ctx = fireTex.getContext();
+  const g = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.4, "rgba(255,200,90,0.8)");
+  g.addColorStop(1, "rgba(255,120,0,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 32, 32);
+  fireTex.update();
+  fireTex.hasAlpha = true;
+  return fireTex;
+}
+
+export function burstAt(scene, pos, texture, count = 50) {
+  const ps = new BABYLON.ParticleSystem("burst", count, scene);
+  ps.particleTexture = texture || getFireTexture(scene);
+  ps.emitter = pos.clone();
+  ps.minEmitBox = new BABYLON.Vector3(-0.06, 0, -0.06);
+  ps.maxEmitBox = new BABYLON.Vector3(0.06, 0.06, 0.06);
+  ps.color1 = new BABYLON.Color4(1, 0.85, 0.3, 1);
+  ps.color2 = new BABYLON.Color4(1, 0.35, 0.04, 0.9);
+  ps.colorDead = new BABYLON.Color4(0.4, 0.1, 0, 0);
+  ps.minLifeTime = 0.25; ps.maxLifeTime = 0.65;
+  ps.minSize = 0.08; ps.maxSize = 0.24;
+  ps.direction1 = new BABYLON.Vector3(-2, 0.5, -2);
+  ps.direction2 = new BABYLON.Vector3(2, 3, 2);
+  ps.minEmitPower = 1; ps.maxEmitPower = 4;
+  ps.gravity = new BABYLON.Vector3(0, -4, 0);
+  ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
+  ps.manualEmitCount = count; // одна порция, без непрерывной генерации
+  ps.start();
+  setTimeout(() => { ps.stop(); setTimeout(() => ps.dispose(), 800); }, 200);
+}
+
 // ---------- Стрелы: урон 1, подбор после остановки, прилипание к мобам ----------
 export const arrows = [];
 export function shootArrow(scene, camera, power) {
@@ -337,7 +379,9 @@ export function shootArrow(scene, camera, power) {
   mesh.position = camera.position.add(dir.scale(0.6));
   mesh.lookAt(mesh.position.add(dir));
   mesh.metadata = { kind: "arrow" };
-  arrows.push({ mesh, vel: dir.scale(speed), grav, stuck: null, stuckOffset: null, stopped: false, age: 0 });
+  arrows.push({ mesh, vel: dir.scale(speed), grav, stuck: null, stuckOffset: null,
+    stopped: false, age: 0, burning: false, burnT: 0, fire: null,
+    ignoreFire: false });
 }
 
 // Стрела отлипает от носителя (смерть зверя, разбитое стекло) и падает.
@@ -349,9 +393,52 @@ function dropArrow(a, vel) {
     new BABYLON.Vector3((Math.random() - 0.5) * 1.2, 0.8 + Math.random() * 0.6, (Math.random() - 0.5) * 1.2));
 }
 
-export function updateArrows(scene, dt, animals, glass, player) {
+function igniteArrow(a, scene, passThrough = false) {
+  if (a.burning) return;
+  a.burning = true; a.burnT = 0;
+  a.stopped = !passThrough;   // из костра — летим дальше, не висим на хитбоксе
+  a.ignoreFire = passThrough; // и больше не цепляемся за невидимый блок огня
+  if (a.mesh.material?.emissiveColor) a.mesh.material.emissiveColor.set(1, 0.3, 0.02);
+  const ps = new BABYLON.ParticleSystem("arrowFire", 28, scene);
+  ps.particleTexture = getFireTexture(scene);
+  ps.emitter = a.mesh;
+  ps.minEmitBox = new BABYLON.Vector3(-0.02, -0.02, -0.02);
+  ps.maxEmitBox = new BABYLON.Vector3(0.02, 0.02, 0.02);
+  ps.color1 = new BABYLON.Color4(1, 0.9, 0.35, 1);
+  ps.color2 = new BABYLON.Color4(1, 0.35, 0.03, 0.9);
+  ps.colorDead = new BABYLON.Color4(0.4, 0.08, 0, 0);
+  ps.minLifeTime = 0.2; ps.maxLifeTime = 0.45;
+  ps.minSize = 0.04; ps.maxSize = 0.12;
+  ps.direction1 = new BABYLON.Vector3(-0.1, 0.6, -0.1);
+  ps.direction2 = new BABYLON.Vector3(0.1, 1.3, 0.1);
+  ps.minEmitPower = 0.1; ps.maxEmitPower = 0.4;
+  ps.gravity = new BABYLON.Vector3(0, 1.2, 0);
+  ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_STANDARD;
+  ps.emitRate = 34;
+  ps.start();
+  a.fire = ps;
+}
+
+export function updateArrows(scene, dt, animals, glass, player, onCameraHit, onHouseHit, onSelfHit) {
   for (let i = arrows.length - 1; i >= 0; i--) {
     const a = arrows[i];
+    if (a.burning) {
+      // Горящая стрела тлеет и полностью сгорает за 1.5 с, НО продолжает
+      // лететь — иначе она зависает в воздухе в точке попадания в костёр.
+      a.burnT += dt;
+      const k = Math.max(0, 1 - a.burnT / 1.5);
+      a.mesh.scaling.setAll(Math.max(0.01, k));
+      if (a.mesh.material?.emissiveColor) {
+        const f = 0.6 + 0.4 * Math.sin(a.burnT * 19);
+        a.mesh.material.emissiveColor.set(f, 0.25 * f, 0.02 * f);
+      }
+      if (a.burnT >= 1.5) {
+        a.fire?.stop(); a.fire?.dispose();
+        a.mesh.dispose(); arrows.splice(i, 1);
+        continue;
+      }
+      // Ниже — обычная баллистика; хитбокс костра для неё уже отключён.
+    }
     if (a.stuck) {
       const host = a.stuck;
       if (host.disposed || host.st.dead) {
@@ -367,6 +454,7 @@ export function updateArrows(scene, dt, animals, glass, player) {
       }
     }
     if (a.stopped) {
+      if (a.burning) continue; // догорает на месте, подбирать такую нельзя
       // Как PickupArea в arrow.tscn: подбор проходом (лучом в 3см стрелу не попасть)
       if (player && a.mesh.position.subtract(player.mesh.position).length() < 1.2) {
         a.mesh.dispose(); arrows.splice(i, 1);
@@ -382,7 +470,8 @@ export function updateArrows(scene, dt, animals, glass, player) {
     const hit = scene.pickWithRay(ray, (m) => m.isPickable !== false && m.isEnabled()
       && m.name !== "arrow" && m.name !== "arrowHead" && m.name !== "fletch"
       && m.name !== "shard"
-      && m.metadata?.kind !== "player" && m.metadata?.kind !== "bow");
+      && m.metadata?.kind !== "player" && m.metadata?.kind !== "bow"
+      && !(a.ignoreFire && m.metadata?.kind === "campfire"));
 
     // Стоп ровно в точке контакта. Раньше стрела сначала делала ПОЛНЫЙ шаг
     // (до 1.25м на полной натяжке), а потом только проверяла попадание —
@@ -407,6 +496,16 @@ export function updateArrows(scene, dt, animals, glass, player) {
     a.mesh.position.copyFrom(impact);
     if (a.vel.lengthSquared() > 0.09) a.mesh.lookAt(impact.add(dir));
 
+    // Стрела, пущенная вверх, падает обратно на игрока — отдельная ачивка.
+    // age > 0.5 исключает попадание собственной стрелой в момент выстрела.
+    if (player && a.age > 0.5 && a.vel.y < 0
+        && a.mesh.position.subtract(player.mesh.position).length() < 0.75) {
+      onSelfHit?.(a.mesh.position.clone());
+      a.fire?.stop(); a.fire?.dispose();
+      a.mesh.dispose(); arrows.splice(i, 1);
+      continue;
+    }
+
     if (groundHit) {
       a.mesh.position.y = getHeight(impact.x, impact.z) + 0.04;
       a.stopped = true;
@@ -418,6 +517,34 @@ export function updateArrows(scene, dt, animals, glass, player) {
         // Разбитое стекло больше не держит стрелу — она падает на землю.
         dropArrow(a, new BABYLON.Vector3((Math.random() - 0.5) * 0.6, -0.2, (Math.random() - 0.5) * 0.6));
         a.age += dt;
+        continue;
+      }
+      if (kind === "campfire") {
+        // Загорается от огня, но пролетает сквозь невидимый хитбокс костра,
+        // а не зависает в нём. Дальше тлеет 1.5 с и полностью сгорает.
+        igniteArrow(a, scene, true);
+        a.age += dt;
+        continue;
+      }
+      if (kind === "house") {
+        // Только ГОРЯЩАЯ стрела поджигает дом; обычная просто застревает.
+        onHouseHit?.(a.burning, a.mesh.position.clone());
+        if (a.burning) {
+          a.fire?.stop(); a.fire?.dispose();
+          a.mesh.dispose(); arrows.splice(i, 1);
+        } else a.stopped = true;
+        continue;
+      }
+      // Камера: модель состоит из нескольких мешей, корень ищем вверх по дереву.
+      let node = m, camRoot = null;
+      while (node && !camRoot) {
+        if (node.metadata?.kind === "seccam") camRoot = node.metadata.root;
+        node = node.parent;
+      }
+      if (camRoot) {
+        burstAt(scene, a.mesh.position, getFireTexture(scene), 24);
+        onCameraHit?.(camRoot, a.mesh.position.clone());
+        a.mesh.dispose(); arrows.splice(i, 1);
         continue;
       }
       // Зверь ищется вверх по родителям: луч бьёт в дочерние меши .glb,
@@ -506,7 +633,7 @@ export function updateResins(scene, dt, player, toast) {
     c.mesh.scaling.setAll(0.95 + 0.1 * Math.sin(c.age * 5));
     if (c.mesh.position.subtract(player.mesh.position).length() < 1.3) {
       player.st.resin = true;
-      toast("Смола получена — используйте её на решётке ямы");
+      toast(t("Смола получена — используйте её на решётке ямы"));
       c.mesh.dispose(); resins.splice(i, 1);
     }
   }

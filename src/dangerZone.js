@@ -5,6 +5,11 @@ import * as BABYLON from "@babylonjs/core";
 import { damagePlayer } from "./entities.js";
 import { getHeight } from "./noise.js";
 
+// Цвет неба/тумана: обычный лес и заражённая зона. Держим их здесь же,
+// чтобы небо менялось вместе со стеной заражения и окраской деревьев.
+const SKY_NORMAL = new BABYLON.Color3(0.16, 0.18, 0.24);
+const SKY_ACID = new BABYLON.Color3(0.10, 0.24, 0.06);
+
 export class DangerZone {
   constructor(scene, player, hud, options = {}) {
     this.scene = scene;
@@ -20,6 +25,8 @@ export class DangerZone {
     this.damageInterval = 1;
     this.damage = options.damage ?? 1.2;
     this.warned = false;
+    this.terrain = options.terrain ?? null;
+    this.skyMix = 0; // 0 — обычное небо, 1 — кислотное
 
     // Тонкая линия по рельефу у основания стены — чтобы граница читалась и
     // под ногами, когда туман за спиной или за деревьями.
@@ -118,6 +125,25 @@ export class DangerZone {
     return Math.hypot(x - this.center.x, z - this.center.z) > this.radius;
   }
 
+  // Плавно красим небо (clearColor) и туман в цвет заражения. У импостеров
+  // дальнего леса свой ShaderMaterial с закэшированным vFogColor — его тоже
+  // обновляем, иначе дальние деревья останутся в серой дымке.
+  updateSky(outside, dt) {
+    const target = outside ? 1 : 0;
+    this.skyMix += (target - this.skyMix) * Math.min(1, dt * 1.1);
+    if (Math.abs(this.skyMix - target) < 0.002) this.skyMix = target;
+    const fog = this.scene.fogColor;
+    BABYLON.Color3.LerpToRef(SKY_NORMAL, SKY_ACID, this.skyMix, fog);
+    const c = this.scene.clearColor;
+    c.set(fog.r, fog.g, fog.b, 1);
+    if (this.terrain) {
+      for (const m of [this.terrain.treeMat, this.terrain.bushMat,
+        this.terrain.infTreeMat, this.terrain.infBushMat]) {
+        m?.setColor3?.("vFogColor", fog);
+      }
+    }
+  }
+
   update(dt) {
     this.elapsed += dt;
     const progress = Math.min(1, this.elapsed / this.duration);
@@ -125,6 +151,7 @@ export class DangerZone {
     this.applyVisuals(dt);
 
     const outside = this.isOutside(this.player.mesh.position.x, this.player.mesh.position.z);
+    this.updateSky(outside, dt);
     if (outside) {
       this.damageTimer += dt;
       if (this.damageTimer >= this.damageInterval) {

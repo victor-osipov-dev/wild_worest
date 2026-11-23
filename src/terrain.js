@@ -23,8 +23,11 @@ attribute vec3 tint;
 uniform mat4 view;
 uniform mat4 viewProjection;
 uniform float vFlip;
+uniform float uTime;
 varying vec2 vUV;
 varying vec3 vTint;
+varying float vInf;
+varying float vPhase;
 #include<fogVertexDeclaration>
 void main() {
   // Первая строка view-матрицы = ось X камеры в мировых координатах (право
@@ -33,6 +36,15 @@ void main() {
   right.y = 0.0;
   vec3 d = position - anchor; // плоская заготовка карточки: (u, v, 0)
   vec3 worldPos = anchor + right * d.x + vec3(0.0, 1.0, 0.0) * d.y;
+  // Здоровый тинт = (1,1,1), заражённый — зелёный (r<0.9). По фазе из координат
+  // основания карточки качаем её, как живую: лишний изгиб кроны и покачивание.
+  vInf = step(tint.r, 0.9);
+  vPhase = anchor.x * 0.37 + anchor.z * 0.61;
+  if (vInf > 0.5) {
+    float h = max(0.0, position.y - anchor.y);
+    worldPos.x += sin(uTime * 1.9 + vPhase) * 0.03 * h;
+    worldPos.y += sin(uTime * 3.0 + vPhase * 1.7) * 0.035 * h;
+  }
   gl_Position = viewProjection * vec4(worldPos, 1.0);
   // vFlip: канвас-атлас (v=0 — верх) и GPU-атлас RT (v=0 — низ кадра) — разные
   vUV = vec2(uv.x, mix(uv.y, 1.0 - uv.y, vFlip));
@@ -45,8 +57,11 @@ void main() {
 BABYLON.Effect.ShadersStore["impostorFragmentShader"] = `
 uniform sampler2D map;
 uniform vec2 texSize;
+uniform float uTime;
 varying vec2 vUV;
 varying vec3 vTint;
+varying float vInf;
+varying float vPhase;
 #include<fogFragmentDeclaration>
 void main() {
   vec4 color = texture2D(map, vUV);
@@ -67,6 +82,12 @@ void main() {
     color.rgb = mix(color.rgb, best.rgb, clamp((0.95 - color.a) * 3.0, 0.0, 1.0));
   }
   color.rgb *= vTint;
+  if (vInf > 0.5) {
+    // Гнилостная подсветка: пульс + уход в ядовито-жёлтый/фиолетовый.
+    float pulse = 0.90 + 0.20 * sin(uTime * 2.9 + vPhase);
+    color.rgb *= pulse;
+    color.rgb = mix(color.rgb, color.rgb * vec3(0.72, 1.18, 0.52), 0.6);
+  }
 #ifdef FOG
   color.rgb = mix(vFogColor, color.rgb, CalcFogFactor());
 #endif
@@ -122,19 +143,20 @@ function waitFrames(n) {
   });
 }
 
-async function bakeImpostorAtlas(st) {
+async function bakeImpostorAtlas(st, infected = false) {
   const scene = st.scene;
-  const SITE = new BABYLON.Vector3(2000, 0, 2000); // далеко от всего
+  const SITE = new BABYLON.Vector3(infected ? 2400 : 2000, 0, infected ? 2400 : 2000);
+  const suffix = infected ? "Inf" : "";
   const bakedParts = [];
   try {
     // --- деревья: 3 варианта в одном кадре 512x256 ---
     // Камера dist 10, fovY .48, RT 512x256 (aspect 2): высота кадра 4.895м,
     // ширина 9.79м = 4 ячейки по 2.447м, ось камеры — граница ячеек 1|2.
-    const treeRT = new BABYLON.RenderTargetTexture("bakeTree",
+    const treeRT = new BABYLON.RenderTargetTexture("bakeTree" + suffix,
       { width: 512, height: 256 }, scene, false);
     treeRT.clearColor = new BABYLON.Color4(0, 0, 0, 0);
     treeRT.hasAlpha = true;
-    const treeCam = new BABYLON.UniversalCamera("bakeTreeCam",
+    const treeCam = new BABYLON.UniversalCamera("bakeTreeCam" + suffix,
       SITE.add(new BABYLON.Vector3(0, 2.1, 10)), scene);
     treeCam.fov = 0.48;
     treeCam.minZ = 0.1; treeCam.maxZ = 50;
@@ -147,34 +169,56 @@ async function bakeImpostorAtlas(st) {
     scene.customRenderTargets.push(treeRT);
     const CELL_W = 2.447; // ширина ячейки атласа в мире (см. addTreeSprite)
     const LEAF_OFFS = [[0, 2.75, 0, 1.6], [0.1, 3.1, -0.1, 1.3], [-0.1, 3.45, 0.1, 1.0]];
+    // Те же смещения, что у ближней заражённой модели (makeInfectedTree).
+    const TUMOR_OFFS = [[0, 2.55, 0, 2.05], [0.18, 3.15, -0.12, 1.6], [-0.14, 3.6, 0.14, 1.25]];
+    const BOIL_OFFS = [[-0.5, 1.95, 0.22, 0.5], [0.52, 2.25, -0.18, 0.42]];
+    const tint = (m, c) => {
+      if (!m.instancedBuffers) m.instancedBuffers = {};
+      m.instancedBuffers.color = c.clone();
+    };
     const treeList = [];
     for (let v = 0; v < 3; v++) {
       const cx = (-1.5 + v) * CELL_W; // центры ячеек 0,1,2 относительно оси камеры
       // createInstance от ВЫКЛЮЧЕННОГО шаблона молча не рендерится в RTT —
       // клоны с общей геометрией рендерятся
-      const trunk = st.trunkTpl.clone("bt" + v);
+      const trunk = st.trunkTpl.clone("bt" + suffix + v);
       trunk.setEnabled(true);
       trunk.position.set(SITE.x + cx, SITE.y + 1.3, SITE.z);
+      if (infected) tint(trunk, INFECT_TRUNK);
       treeList.push(trunk);
       bakedParts.push(trunk);
-      for (let i = 0; i < LEAF_OFFS.length; i++) {
-        const [ox, oy, oz, d] = LEAF_OFFS[i];
-        const leaf = st.leafTpls[v].clone(`bl${v}_${i}`);
-        leaf.setEnabled(true);
-        leaf.position.set(SITE.x + cx + ox, SITE.y + oy, SITE.z + oz);
-        leaf.scaling.setAll(d);
-        treeList.push(leaf);
-        bakedParts.push(leaf);
+      const crown = infected ? TUMOR_OFFS : LEAF_OFFS;
+      for (let i = 0; i < crown.length; i++) {
+        const [ox, oy, oz, d] = crown[i];
+        const part = (infected ? st.tumorTpl : st.leafTpls[v]).clone(`bl${suffix}${v}_${i}`);
+        part.setEnabled(true);
+        part.position.set(SITE.x + cx + ox, SITE.y + oy, SITE.z + oz);
+        part.scaling.setAll(d);
+        if (infected) tint(part, i === 1 ? INFECT_TUMOR_B : INFECT_TUMOR_A);
+        treeList.push(part);
+        bakedParts.push(part);
+      }
+      if (infected) {
+        for (let i = 0; i < BOIL_OFFS.length; i++) {
+          const [ox, oy, oz, d] = BOIL_OFFS[i];
+          const boil = st.boilTpl.clone(`bb${suffix}${v}_${i}`);
+          boil.setEnabled(true);
+          boil.position.set(SITE.x + cx + ox, SITE.y + oy, SITE.z + oz);
+          boil.scaling.setAll(d);
+          tint(boil, INFECT_BOIL);
+          treeList.push(boil);
+          bakedParts.push(boil);
+        }
       }
     }
     treeRT.renderList = treeList;
     await waitFrames(10); // шейдеры/матрицы/текстуры оседают в кадрах
     // --- кусты: 2 варианта в одном кадре 256x128 (ячейка 2.211м) ---
-    const bushRT = new BABYLON.RenderTargetTexture("bakeBush",
+    const bushRT = new BABYLON.RenderTargetTexture("bakeBush" + suffix,
       { width: 256, height: 128 }, scene, false);
     bushRT.clearColor = new BABYLON.Color4(0, 0, 0, 0);
     bushRT.hasAlpha = true;
-    const bushCam = new BABYLON.UniversalCamera("bakeBushCam",
+    const bushCam = new BABYLON.UniversalCamera("bakeBushCam" + suffix,
       SITE.add(new BABYLON.Vector3(0, 0.45, 10)), scene);
     bushCam.fov = 0.22;
     bushCam.minZ = 0.1; bushCam.maxZ = 50;
@@ -189,12 +233,22 @@ async function bakeImpostorAtlas(st) {
       const cx = (-0.5 + v) * BC; // центры ячеек 0,1
       for (let i = 0; i < BUSH_OFFS.length; i++) {
         const [ox, oy, oz, d] = BUSH_OFFS[i];
-        const b = st.leafTpls[v].clone(`bb${v}_${i}`);
+        const b = (infected ? st.tumorTpl : st.leafTpls[v]).clone(`bi${suffix}${v}_${i}`);
         b.setEnabled(true);
         b.position.set(SITE.x + cx + ox, SITE.y + oy, SITE.z + oz);
         b.scaling.setAll(d);
+        if (infected) tint(b, i === 1 ? INFECT_TUMOR_B : INFECT_TUMOR_A);
         bushList.push(b);
         bakedParts.push(b);
+      }
+      if (infected) {
+        const boil = st.boilTpl.clone(`bio${v}`);
+        boil.setEnabled(true);
+        boil.position.set(SITE.x + cx + 0.12, SITE.y + 0.78, SITE.z - 0.08);
+        boil.scaling.setAll(0.46);
+        tint(boil, INFECT_BOIL);
+        bushList.push(boil);
+        bakedParts.push(boil);
       }
     }
     bushRT.renderList = bushList;
@@ -272,6 +326,78 @@ function bushSpriteURL() {
   return c.toDataURL("image/png");
 }
 
+// Фолбэк-атлас ЗАРАЖЁННОГО леса, если GPU-запекание недоступно. Раскладка
+// ячеек та же (3 дерева / 2 куста), но силуэт неровный, с фиолетовыми нарывами.
+function infectedTreeSpriteURL() {
+  const c = document.createElement("canvas"); c.width = 512; c.height = 256;
+  const g = c.getContext("2d");
+  const tints = ["#3c5c11", "#2c470b", "#456a14"];
+  for (let v = 0; v < 3; v++) {
+    g.save(); g.translate(v * 128, 0);
+    let seed = 71 + v * 13;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) | 0, ((seed >>> 0) % 1000) / 1000);
+    g.fillStyle = "#1b2410"; g.fillRect(58, 150, 12, 106);
+    g.fillStyle = tints[v];
+    // Крона — колючий многоугольник вместо гладких кругов.
+    g.beginPath();
+    for (let i = 0; i <= 28; i++) {
+      const a = i / 28 * Math.PI * 2;
+      const rr = (i % 2 ? 34 : 49) + rnd() * 7;
+      const x = 64 + Math.cos(a) * rr, y = 88 + Math.sin(a) * rr * 0.82;
+      if (i) g.lineTo(x, y); else g.moveTo(x, y);
+    }
+    g.closePath(); g.fill();
+    for (const [x, y, r] of [[38, 108, 19], [91, 104, 17], [64, 46, 22]]) {
+      g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+    }
+    g.globalCompositeOperation = "source-atop";
+    for (let i = 0; i < 8; i++) {
+      g.fillStyle = i % 2 ? "rgba(150,70,205,.9)" : "rgba(198,120,245,.92)";
+      g.beginPath(); g.arc(32 + rnd() * 66, 50 + rnd() * 92, 3 + rnd() * 6, 0, 7); g.fill();
+    }
+    for (let i = 0; i < 55; i++) {
+      g.fillStyle = rnd() < 0.5 ? "#12200a" : "#0b1606";
+      g.beginPath(); g.arc(rnd() * 128, 20 + rnd() * 145, 1 + rnd() * 2.5, 0, 7); g.fill();
+    }
+    g.globalCompositeOperation = "source-over";
+    g.restore();
+  }
+  bleedAlpha(g, 512, 256);
+  return c.toDataURL("image/png");
+}
+function infectedBushSpriteURL() {
+  const c = document.createElement("canvas"); c.width = 256; c.height = 128;
+  const g = c.getContext("2d");
+  const tints = ["#3c5c11", "#2c470b"];
+  for (let v = 0; v < 2; v++) {
+    g.save(); g.translate(v * 128, 0);
+    let seed = 83 + v * 17;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) | 0, ((seed >>> 0) % 1000) / 1000);
+    g.fillStyle = tints[v];
+    g.beginPath();
+    for (let i = 0; i <= 20; i++) {
+      const a = i / 20 * Math.PI * 2;
+      const rr = (i % 2 ? 33 : 45) + rnd() * 6;
+      const x = 64 + Math.cos(a) * rr, y = 76 + Math.sin(a) * rr * 0.7;
+      if (i) g.lineTo(x, y); else g.moveTo(x, y);
+    }
+    g.closePath(); g.fill();
+    g.globalCompositeOperation = "source-atop";
+    for (let i = 0; i < 5; i++) {
+      g.fillStyle = i % 2 ? "rgba(150,70,205,.9)" : "rgba(198,120,245,.92)";
+      g.beginPath(); g.arc(38 + rnd() * 54, 50 + rnd() * 52, 3 + rnd() * 5, 0, 7); g.fill();
+    }
+    for (let i = 0; i < 40; i++) {
+      g.fillStyle = rnd() < 0.5 ? "#12200a" : "#0b1606";
+      g.beginPath(); g.arc(rnd() * 128, 30 + rnd() * 80, 1 + rnd() * 2, 0, 7); g.fill();
+    }
+    g.globalCompositeOperation = "source-over";
+    g.restore();
+  }
+  bleedAlpha(g, 256, 128);
+  return c.toDataURL("image/png");
+}
+
 // Материал импостеров: как у SpriteManager — без мипов и без инверсии
 // (v=0 — верхняя строка картинки), туман сцены берём тот же, что у спрайтов.
 // Альфа-тест вместо блендинга: карточка пишет глубину и не требует сортировки.
@@ -281,7 +407,7 @@ function makeImpostorMaterial(scene, name, url, texW, texH) {
   const m = new BABYLON.ShaderMaterial(name, scene,
     { vertex: "impostor", fragment: "impostor" }, {
       attributes: ["position", "uv", "anchor", "tint"],
-      uniforms: ["view", "viewProjection", "vFlip", "texSize",
+      uniforms: ["view", "viewProjection", "vFlip", "texSize", "uTime",
         "vFogInfos", "vFogColor"],
       samplers: ["map"],
       defines: fogOn ? ["FOG"] : [],
@@ -331,6 +457,30 @@ const TREE_SPACING = 2.5, TREE_DENSITY = 0.42;
 const BUSH_SPACING = 1.6, BUSH_DENSITY = 0.30;
 const SPAWN_CLEAR = 26.0, HOUSE_CLEAR = 14.0;
 
+// Шаблон «опухоли»: неровный шипастый ком вместо гладкой листвы. Вершины
+// икосаэдра вытягиваются детерминированным шумом, затем грани разворачиваются
+// во flat-shaded — силуэт читается как больной нарост даже вдалеке.
+function makeTumorTpl(scene, name, mat, seed) {
+  const m = BABYLON.MeshBuilder.CreateIcoSphere(name,
+    { radius: 0.5, subdivisions: 2, flat: false }, scene);
+  const p = m.getVerticesData(BABYLON.VertexBuffer.PositionKind);
+  for (let i = 0; i < p.length; i += 3) {
+    const x = p[i], y = p[i + 1], z = p[i + 2];
+    const len = Math.hypot(x, y, z) || 1;
+    const n = Math.sin(x * 13.7 + seed) * Math.cos(y * 11.3 - seed) * Math.sin(z * 9.1 + seed * 2);
+    const k = 0.80 + 0.30 * Math.abs(n) + 0.18 * Math.max(0, n);
+    p[i] = x / len * 0.5 * k;
+    p[i + 1] = y / len * 0.5 * k;
+    p[i + 2] = z / len * 0.5 * k;
+  }
+  m.updateVerticesData(BABYLON.VertexBuffer.PositionKind, p);
+  m.convertToFlatShadedMesh();
+  m.material = mat;
+  m.registerInstancedBuffer("color", 4);
+  m.setEnabled(false);
+  return m;
+}
+
 export function initTerrain(scene) {
   const grassTex = new BABYLON.Texture(asset("assets/textures/grass_diff.jpg"), scene);
   grassTex.uScale = 1; grassTex.vScale = 1; // UV уже мировые (x/4) — тайл 4м
@@ -376,19 +526,38 @@ export function initTerrain(scene) {
   trunkTpl.registerInstancedBuffer("color", 4);
   for (const t of leafTpls) t.registerInstancedBuffer("color", 4);
 
+  // Заражённая растительность: гнилостный нарост + фиолетовые споры.
+  // Материалы общие, поэтому пульсация подсветки — одно обновление на кадр.
+  const infLeafMat = new BABYLON.StandardMaterial("infTumorMat", scene);
+  infLeafMat.diffuseColor = new BABYLON.Color3(0.16, 0.34, 0.05);
+  infLeafMat.emissiveColor = new BABYLON.Color3(0.18, 0.42, 0.03);
+  infLeafMat.specularColor = new BABYLON.Color3(0, 0, 0);
+  const infBoilMat = new BABYLON.StandardMaterial("infBoilMat", scene);
+  infBoilMat.diffuseColor = new BABYLON.Color3(0.21, 0.06, 0.24);
+  infBoilMat.emissiveColor = new BABYLON.Color3(0.32, 0.08, 0.42);
+  infBoilMat.specularColor = new BABYLON.Color3(0.05, 0, 0.06);
+  const tumorTpl = makeTumorTpl(scene, "tumorTpl", infLeafMat, 1.7);
+  const boilTpl = makeTumorTpl(scene, "boilTpl", infBoilMat, 4.3);
+
   // Материалы импостеров дальнего леса: ВЕСЬ дальний лес = 1 draw call на чанк
   // (одна слитая карточка для деревьев + одна для кустов).
   // Текстура — запечённые настоящие 3D (3 варианта деревьев, 2 кустов);
   // если запекание не удалось — рисованный фолбэк.
   // Раскладка атласа: 4 колонки по 128px на 512 у деревьев (3 из 4 заняты),
   // 2 колонки на 256 у кустов; строка одна — v идёт от верха картинки к низу.
+  let resolveReady;
+  const ready = new Promise((r) => { resolveReady = r; });
   const st = {
     scene, mat, trunkTpl, leafTpls, chunks: new Map(), bakeError: null,
     treeCells: 3, bushCells: 2, treeCols: 4, bushCols: 2,
+    tumorTpl, boilTpl, infLeafMat, infBoilMat, animated: [],
+    ready, // резолвится, когда атлас запечён (или фолбэк/таймаут)
   };
   // Стартово — рисованный фолбэк (держит чанки, что строятся ДО запекания).
   st.treeMat = makeImpostorMaterial(scene, "impostorTreeMat", treeSpriteURL(), 512, 256);
   st.bushMat = makeImpostorMaterial(scene, "impostorBushMat", bushSpriteURL(), 256, 128);
+  st.infTreeMat = makeImpostorMaterial(scene, "impostorInfTreeMat", infectedTreeSpriteURL(), 512, 256);
+  st.infBushMat = makeImpostorMaterial(scene, "impostorInfBushMat", infectedBushSpriteURL(), 256, 128);
   // Запекание — ПОСЛЕ готовности НУЖНЫХ ЕМУ текстур (кора/трава): в момент
   // initTerrain jpg ещё в сети, материалы не готовы и RTT рендерит чёрный
   // кадр — фолбэк оставался навсегда. Глобальный scene.isReady() в headless
@@ -400,16 +569,25 @@ export function initTerrain(scene) {
       setTimeout(poll, 100);
       return;
     }
-    if (tries <= 0) { st.bakeError = "assets not ready"; return; }
+    if (tries <= 0) { st.bakeError = "assets not ready"; resolveReady(); return; }
     try {
-      const baked = await bakeImpostorAtlas(st);
+      const baked = await bakeImpostorAtlas(st, false);
       if (baked) {
         st.treeMat.setTexture("map", baked.treeTex);
         st.treeMat.setFloat("vFlip", 1);
         st.bushMat.setTexture("map", baked.bushTex);
         st.bushMat.setFloat("vFlip", 1);
       }
+      // Второй атлас — с заражённых 3D-моделей (опухоли + споры).
+      const sick = await bakeImpostorAtlas(st, true);
+      if (sick) {
+        st.infTreeMat.setTexture("map", sick.treeTex);
+        st.infTreeMat.setFloat("vFlip", 1);
+        st.infBushMat.setTexture("map", sick.bushTex);
+        st.infBushMat.setFloat("vFlip", 1);
+      }
     } catch { /* bakeError уже записан, фолбэк остаётся */ }
+    finally { resolveReady(); }
   };
   poll();
   // Стартовые чанки вокруг спавна (0,-14) — сразу все, без поп-ина под меню
@@ -503,7 +681,7 @@ export function updateTerrain(st, px, pz, ex, ez, efx, efz, playerRadius = VIEW_
       const near = hasFeed &&
         Math.max(Math.abs(ch.cx - fcx), Math.abs(ch.cz - fcz)) <= FEED_RETAIN;
       if (near) continue; // удержание: конус свернул — чанки на своём месте
-      disposeChunk(ch); st.chunks.delete(k); continue;
+      disposeChunk(st, ch); st.chunks.delete(k); continue;
     }
     // Чанк был спрайтовым, а теперь внутри кольца вида игрока или колец фида —
     // перестроить в полном 3D (и наоборот). Спрайтами остаётся ТОЛЬКО дальний
@@ -516,15 +694,35 @@ export function updateTerrain(st, px, pz, ex, ez, efx, efz, playerRadius = VIEW_
   missing.sort((a, b) => a[2] - b[2]);
   for (const [cx, cz] of missing) {
     const k = chunkKey(cx, cz);
-    if (st.chunks.has(k)) { disposeChunk(st.chunks.get(k)); st.chunks.delete(k); }
+    if (st.chunks.has(k)) { disposeChunk(st, st.chunks.get(k)); st.chunks.delete(k); }
     st.chunks.set(k, buildChunk(st, cx, cz, wantFarFor(cx, cz)));
   }
 }
 
-function disposeChunk(ch) {
+function disposeChunk(st, ch) {
   ch.ground.dispose();
+  const owned = new Set(ch.nodes);
+  for (let i = st.animated.length - 1; i >= 0; i--) {
+    if (owned.has(st.animated[i].node)) st.animated.splice(i, 1);
+  }
   for (const n of ch.nodes) n.dispose();
   for (const s of ch.sprites) s.dispose();
+}
+
+function disposeNodes(st, ch, nodes) {
+  if (!nodes || !nodes.length) return;
+  for (const n of nodes) {
+    for (let i = st.animated.length - 1; i >= 0; i--) {
+      if (st.animated[i].node === n) { st.animated.splice(i, 1); break; }
+    }
+    const j = ch.nodes.indexOf(n);
+    if (j >= 0) ch.nodes.splice(j, 1);
+    n.dispose();
+  }
+}
+
+function addAnimated(st, node, base, phase, x, z) {
+  st.animated.push({ node, base, phase, x, z });
 }
 
 function buildChunk(st, cx, cz, far = false) {
@@ -569,7 +767,7 @@ function buildChunk(st, cx, cz, far = false) {
 
   const ch = {
     cx, cz, far, ground, nodes: [], sprites: [], visible: true,
-    cards: { tree: [], bush: [] }, treePts: [],
+    cards: { tree: [], bush: [] }, treePts: [], bushRecs: [],
   };
   populateTrees(st, ch, cxw, czw, far);
   populateBushes(st, ch, cxw, czw, far);
@@ -626,13 +824,12 @@ function setChunkVisible(ch, v) {
 export function clearBushes(st, x, z, radius) {
   const r2 = radius * radius;
   for (const ch of st.chunks.values()) {
-    for (let i = ch.nodes.length - 1; i >= 0; i--) {
-      const n = ch.nodes[i];
-      if (n.name !== "bush") continue;
-      const dx = n.position.x - x, dz = n.position.z - z;
+    for (let i = ch.bushRecs.length - 1; i >= 0; i--) {
+      const b = ch.bushRecs[i];
+      const dx = b.x - x, dz = b.z - z;
       if (dx * dx + dz * dz > r2) continue;
-      ch.nodes.splice(i, 1);
-      n.dispose();
+      disposeNodes(st, ch, b.nodes);
+      ch.bushRecs.splice(i, 1);
     }
   }
 }
@@ -704,11 +901,11 @@ function populateTrees(st, ch, ox, oz, far = false) {
       // Мягкая коллизия игрока: спрайты-деревья сами не коллят, а тонкий
       // ствол-инстанс в своём чанке есть — радиус одинаков, чтобы не спорили.
       const r = 0.12 * s + 0.35;
-      const nodes = far ? [] : makeTreeInst(st, ch, px, y, pz, s, rand01(rng) * Math.PI * 2);
-      ch.treePts.push({
-        x: px, z: pz, r, r2: r * r, nodes,
-        infected: !!(st.infectionAt && st.infectionAt(px, pz)),
-      });
+      const rot = rand01(rng) * Math.PI * 2;
+      const infected = !!(st.infectionAt && st.infectionAt(px, pz));
+      const rec = { x: px, y, z: pz, r, r2: r * r, s, rot, far, nodes: [], infected };
+      if (!far) setTreeLook(st, ch, rec, infected);
+      ch.treePts.push(rec);
       if (far) addTreeSprite(st, ch, px, y, pz, s, Math.abs(Math.round(px * 3 + pz)) % 3);
     }
   }
@@ -732,8 +929,14 @@ function populateBushes(st, ch, ox, oz, far = false) {
       const y = getHeight(px, pz);
       // Сюжет может попросить не заращивать кустами место остатков камеры.
       if (st.bushClearAt && st.bushClearAt(px, pz)) continue;
-      if (far) addBushSprite(st, ch, px, y, pz, s, Math.abs(Math.round(px * 5 + pz * 2)) % 2);
-      else makeBushInst(st, ch, px, y, pz, s);
+      if (far) {
+        addBushSprite(st, ch, px, y, pz, s, Math.abs(Math.round(px * 5 + pz * 2)) % 2);
+      } else {
+        const infected = !!(st.infectionAt && st.infectionAt(px, pz));
+        const rec = { x: px, y, z: pz, s, infected, nodes: [] };
+        rec.nodes = makeBushInst(st, ch, px, y, pz, s, infected);
+        ch.bushRecs.push(rec);
+      }
     }
   }
 }
@@ -753,6 +956,7 @@ function addTreeSprite(st, ch, x, y, z, s, v) {
   ch.cards.tree.push({
     x, z, y: y + 2.1 * s - h / 2, w: 2.447 * s, h,
     cell: ((v % st.treeCells) + st.treeCells) % st.treeCells,
+    infected: !!(st.infectionAt && st.infectionAt(x, z)),
   });
 }
 function addBushSprite(st, ch, x, y, z, s, v) {
@@ -760,6 +964,7 @@ function addBushSprite(st, ch, x, y, z, s, v) {
   ch.cards.bush.push({
     x, z, y: y + 0.45 * s - h / 2, w: 2.211 * s, h,
     cell: ((v % st.bushCells) + st.bushCells) % st.bushCells,
+    infected: !!(st.infectionAt && st.infectionAt(x, z)),
   });
 }
 
@@ -769,54 +974,52 @@ function addBushSprite(st, ch, x, y, z, s, v) {
 // вращается вокруг основания и из плоской заготовки вылезает за её пределы.
 function buildImpostorChunk(st, ch) {
   for (const kind of ["tree", "bush"]) {
-    const cards = ch.cards[kind];
-    if (!cards.length) continue;
     const cols = kind === "tree" ? st.treeCols : st.bushCols;
-    const positions = [], uvs = [], anchors = [], normals = [], indices = [];
-    // Цвет заражения на каждую карточку: за стеной лес темнеет и краснеет.
-    // Атрибут статичен на момент сборки чанка, дальше его обновляет
-    // refreshInfection() по мере сжатия зоны.
-    const tint = [];
-    const min = new BABYLON.Vector3(Infinity, Infinity, Infinity);
-    const max = new BABYLON.Vector3(-Infinity, -Infinity, -Infinity);
-    for (const c of cards) {
-      const b = positions.length / 3;
-      const x0 = c.x - c.w / 2, x1 = c.x + c.w / 2, y1 = c.y + c.h;
-      positions.push(x0, y1, c.z, x1, y1, c.z, x0, c.y, c.z, x1, c.y, c.z);
-      for (let i = 0; i < 4; i++) { anchors.push(c.x, c.y, c.z); normals.push(0, 0, -1); }
-      const tc = st.infectionAt && st.infectionAt(c.x, c.z)
-        ? INFECT_SPRITE : NORMAL_SPRITE;
-      for (let i = 0; i < 4; i++) tint.push(tc.r, tc.g, tc.b);
-      const u0 = c.cell / cols, u1 = (c.cell + 1) / cols;
-      uvs.push(u0, 0, u1, 0, u0, 1, u1, 1);
-      indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
-      if (x0 < min.x) min.x = x0;
-      if (x1 > max.x) max.x = x1;
-      if (c.y < min.y) min.y = c.y;
-      if (y1 > max.y) max.y = y1;
-      if (c.z - c.w / 2 < min.z) min.z = c.z - c.w / 2;
-      if (c.z + c.w / 2 > max.z) max.z = c.z + c.w / 2;
+    // Здоровые и заражённые карточки идут в РАЗНЫЕ меши: у них разные атласы.
+    // По-прежнему 1 draw call на группу — обычно 2 на чанк вместо одного.
+    for (const infected of [false, true]) {
+      const cards = ch.cards[kind].filter((c) => !!c.infected === infected);
+      if (!cards.length) continue;
+      const positions = [], uvs = [], anchors = [], normals = [], indices = [];
+      const tint = [];
+      const min = new BABYLON.Vector3(Infinity, Infinity, Infinity);
+      const max = new BABYLON.Vector3(-Infinity, -Infinity, -Infinity);
+      for (const c of cards) {
+        const b = positions.length / 3;
+        const x0 = c.x - c.w / 2, x1 = c.x + c.w / 2, y1 = c.y + c.h;
+        positions.push(x0, y1, c.z, x1, y1, c.z, x0, c.y, c.z, x1, c.y, c.z);
+        for (let i = 0; i < 4; i++) { anchors.push(c.x, c.y, c.z); normals.push(0, 0, -1); }
+        const tc = infected ? INFECT_SPRITE : NORMAL_SPRITE;
+        for (let i = 0; i < 4; i++) tint.push(tc.r, tc.g, tc.b);
+        const u0 = c.cell / cols, u1 = (c.cell + 1) / cols;
+        uvs.push(u0, 0, u1, 0, u0, 1, u1, 1);
+        indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+        if (x0 < min.x) min.x = x0;
+        if (x1 > max.x) max.x = x1;
+        if (c.y < min.y) min.y = c.y;
+        if (y1 > max.y) max.y = y1;
+        if (c.z - c.w / 2 < min.z) min.z = c.z - c.w / 2;
+        if (c.z + c.w / 2 > max.z) max.z = c.z + c.w / 2;
+      }
+      const mesh = new BABYLON.Mesh(`${kind}Imp_${ch.cx}_${ch.cz}${infected ? "_inf" : ""}`, st.scene);
+      const vd = new BABYLON.VertexData();
+      vd.positions = positions; vd.uvs = uvs; vd.normals = normals; vd.indices = indices;
+      vd.applyToMesh(mesh);
+      mesh.setVerticesData("anchor", anchors, false, 3);
+      mesh.setVerticesData("tint", new Float32Array(tint), false, 3);
+      mesh.setBoundingInfo(new BABYLON.BoundingInfo(min, max));
+      const mat = infected
+        ? (kind === "tree" ? st.infTreeMat : st.infBushMat)
+        : (kind === "tree" ? st.treeMat : st.bushMat);
+      mesh.material = mat;
+      mesh.isPickable = true;
+      mesh.metadata = { kind: kind === "tree" ? "tree" : "bush" };
+      mesh.checkCollisions = false;
+      mesh.freezeWorldMatrix();
+      ch.sprites.push(mesh);
+      if (!ch.tints) ch.tints = [];
+      ch.tints.push({ mesh, cards, values: new Float32Array(tint) });
     }
-    const mesh = new BABYLON.Mesh(`${kind}Imp_${ch.cx}_${ch.cz}`, st.scene);
-    const vd = new BABYLON.VertexData();
-    vd.positions = positions; vd.uvs = uvs; vd.normals = normals; vd.indices = indices;
-    vd.applyToMesh(mesh);
-    // stride обязателен: у нестандартного kind нет DeduceStride
-    mesh.setVerticesData("anchor", anchors, false, 3);
-    mesh.setVerticesData("tint", new Float32Array(tint), false, 3);
-    mesh.setBoundingInfo(new BABYLON.BoundingInfo(min, max));
-    mesh.material = kind === "tree" ? st.treeMat : st.bushMat;
-    // Пик ВКЛЮЧАЕМ: спрайты теперь начинаются в 16м от игрока — стрелы и
-    // установка камер должны ловить деревья и в дальних чанках. Коллизии
-    // (checkCollisions) НЕ включаем: плоская заготовка не совпадает с
-    // билбордом после шейдерного поворота — были бы невидимые стены.
-    mesh.isPickable = true;
-    mesh.metadata = { kind: kind === "tree" ? "tree" : "bush" };
-    mesh.checkCollisions = false;
-    mesh.freezeWorldMatrix();
-    ch.sprites.push(mesh);
-    if (!ch.tints) ch.tints = [];
-    ch.tints.push({ mesh, cards, values: new Float32Array(tint) });
   }
 }
 
@@ -829,70 +1032,74 @@ export function refreshInfection(st) {
   if (!fn) return;
   for (const ch of st.chunks.values()) {
     for (const t of ch.treePts) {
-      if (!t.nodes || !t.nodes.length) continue;
+      if (t.far) continue; // дальний лес — только карточки с тинтом
       const inf = !!fn(t.x, t.z);
       if (t.infected === inf) continue;
-      t.infected = inf;
-      for (let i = 0; i < t.nodes.length; i++) {
-        const n = t.nodes[i];
-        if (!n.instancedBuffers) continue;
-        const src = i === 0
-          ? (inf ? INFECT_TRUNK : NORMAL_INST)
-          : (inf ? INFECT_LEAF : NORMAL_INST);
-        n.instancedBuffers.color = src.clone();
+      setTreeLook(st, ch, t, inf); // меняем САМУ модель: листва → опухоли + споры
+    }
+    // Кусты за стеной тоже превращаются в гнилостные комки.
+    for (const b of ch.bushRecs) {
+      const inf = !!fn(b.x, b.z);
+      if (b.infected === inf) continue;
+      disposeNodes(st, ch, b.nodes);
+      b.infected = inf;
+      b.nodes = makeBushInst(st, ch, b.x, b.y, b.z, b.s, inf);
+    }
+    // Дальний лес: если у карточки сменился статус, пересобираем меши чанка —
+    // здоровые и заражённые карточки лежат в разных атласах и разных мешах.
+    let farChanged = false;
+    for (const kind of ["tree", "bush"]) {
+      for (const c of ch.cards[kind]) {
+        const inf = !!fn(c.x, c.z);
+        if (c.infected === inf) continue;
+        c.infected = inf;
+        farChanged = true;
       }
     }
-    // Кусты — тоже часть заражённого леса.
-    for (const n of ch.nodes) {
-      if (n.name !== "bush") continue;
-      const inf = !!fn(n.position.x, n.position.z);
-      if (n.__inf === inf) continue;
-      n.__inf = inf;
-      n.instancedBuffers.color = (inf ? INFECT_LEAF : NORMAL_INST).clone();
-    }
-    if (!ch.tints) continue;
-    for (const rec of ch.tints) {
-      let changed = false;
-      const vals = rec.values;
-      for (let i = 0; i < rec.cards.length; i++) {
-        const c = rec.cards[i];
-        const tc = fn(c.x, c.z) ? INFECT_SPRITE : NORMAL_SPRITE;
-        const o = i * 12;
-        for (let v = 0; v < 4; v++) {
-          const q = o + v * 3;
-          if (vals[q] !== tc.r || vals[q + 1] !== tc.g || vals[q + 2] !== tc.b) changed = true;
-          vals[q] = tc.r; vals[q + 1] = tc.g; vals[q + 2] = tc.b;
-        }
-      }
-      if (changed) rec.mesh.updateVerticesData("tint", vals);
+    if (farChanged && ch.sprites.length) {
+      for (const s of ch.sprites) s.dispose();
+      ch.sprites.length = 0;
+      if (ch.tints) ch.tints.length = 0;
+      buildImpostorChunk(st, ch);
+      setChunkVisible(ch, ch.visible); // новые меши не должны зажечься в скрытом чанке
     }
   }
 }
 
 const INFECT_SPRITE = new BABYLON.Color3(0.5, 0.82, 0.25);
 const NORMAL_SPRITE = new BABYLON.Color3(1, 1, 1);
-const INFECT_TRUNK = new BABYLON.Color4(0.25, 0.34, 0.12, 1);
-const INFECT_LEAF = new BABYLON.Color4(0.32, 0.66, 0.1, 1);
+const INFECT_TRUNK = new BABYLON.Color4(0.22, 0.30, 0.09, 1);
+const INFECT_TUMOR_A = new BABYLON.Color4(0.72, 1.0, 0.30, 1);
+const INFECT_TUMOR_B = new BABYLON.Color4(0.42, 0.80, 0.16, 1);
+const INFECT_BOIL = new BABYLON.Color4(0.85, 0.55, 1.0, 1);
 const NORMAL_INST = new BABYLON.Color4(1, 1, 1, 1);
+
+// Полная замена модели дерева при заражении: ствол темнеет, вместо трёх шаров
+// листвы — неровные опухоли, плюс два фиолетовых мешка спор под кроной.
+function setTreeLook(st, ch, t, infected) {
+  if (t.nodes.length) disposeNodes(st, ch, t.nodes);
+  t.nodes = infected
+    ? makeInfectedTree(st, ch, t.x, t.y, t.z, t.s, t.rot)
+    : makeTreeInst(st, ch, t.x, t.y, t.z, t.s, t.rot);
+  t.infected = infected;
+}
 
 function makeTreeInst(st, ch, x, y, z, s, rotY) {
   const nodes = [];
-  const infected = !!(st.infectionAt && st.infectionAt(x, z));
-  const trunk = st.trunkTpl.createInstance(`trunk`);
-  trunk.instancedBuffers.color = (infected ? INFECT_TRUNK : NORMAL_INST).clone();
+  const trunk = st.trunkTpl.createInstance("trunk");
+  trunk.instancedBuffers.color = NORMAL_INST.clone();
   trunk.position.set(x, y + 1.3 * s, z);
   trunk.scaling.setAll(s);
   trunk.rotation.y = rotY;
   trunk.isPickable = true;
   trunk.checkCollisions = true;
   trunk.metadata = { kind: "tree" };
-  // Статика: без пересчёта world matrix каждый кадр (тысячи инстансов)
-  trunk.freezeWorldMatrix();
+  trunk.freezeWorldMatrix(); // статика: без пересчёта матриц каждый кадр
   ch.nodes.push(trunk); nodes.push(trunk);
   const leafTpl = st.leafTpls[Math.abs(Math.round(x * 3 + z)) % 3];
   [[0, 2.75, 0, 1.6], [0.1, 3.1, -0.1, 1.3], [-0.1, 3.45, 0.1, 1.0]].forEach(([ox, oy, oz, d]) => {
-    const leaf = leafTpl.createInstance(`leaf`);
-    leaf.instancedBuffers.color = (infected ? INFECT_LEAF : NORMAL_INST).clone();
+    const leaf = leafTpl.createInstance("leaf");
+    leaf.instancedBuffers.color = NORMAL_INST.clone();
     const ca = Math.cos(rotY), sa = Math.sin(rotY);
     leaf.position.set(x + (ox * ca - oz * sa) * s, y + oy * s, z + (ox * sa + oz * ca) * s);
     leaf.scaling.setAll(d * s);
@@ -903,17 +1110,90 @@ function makeTreeInst(st, ch, x, y, z, s, rotY) {
   return nodes;
 }
 
-function makeBushInst(st, ch, x, y, z, s) {
-  const leafTpl = st.leafTpls[Math.abs(Math.round(x * 5 + z * 2)) % 3];
-  const infected = !!(st.infectionAt && st.infectionAt(x, z));
-  [[0, 0.4, 0, 0.8], [0.3, 0.3, 0.2, 0.6], [-0.3, 0.3, -0.15, 0.5]].forEach(([ox, oy, oz, d]) => {
-    const b = leafTpl.createInstance(`bush`);
-    b.instancedBuffers.color = (infected ? INFECT_LEAF : NORMAL_INST).clone();
-    b.__inf = infected;
+function makeInfectedTree(st, ch, x, y, z, s, rotY) {
+  const nodes = [];
+  // Тот же ствол, но почти чёрный, с гнилостным зелёным оттенком.
+  const trunk = st.trunkTpl.createInstance("trunkInf");
+  trunk.instancedBuffers.color = INFECT_TRUNK.clone();
+  trunk.position.set(x, y + 1.3 * s, z);
+  trunk.scaling.setAll(s);
+  trunk.rotation.y = rotY;
+  trunk.isPickable = true;
+  trunk.checkCollisions = true;
+  trunk.metadata = { kind: "tree" };
+  trunk.freezeWorldMatrix();
+  ch.nodes.push(trunk); nodes.push(trunk);
+
+  const ca = Math.cos(rotY), sa = Math.sin(rotY);
+  const place = (n, ox, oy, oz, d, color, animated) => {
+    n.instancedBuffers.color = color.clone();
+    n.position.set(x + (ox * ca - oz * sa) * s, y + oy * s, z + (ox * sa + oz * ca) * s);
+    n.scaling.setAll(d * s);
+    n.isPickable = false;
+    n.metadata = { kind: "tree" };
+    if (animated) addAnimated(st, n, d * s, (x * 0.31 + z * 0.17) % 6.28, x, z);
+    else n.freezeWorldMatrix();
+    ch.nodes.push(n); nodes.push(n);
+  };
+  // Крона из трёх опухолей разного размера — силуэт уже не «шарик на палке».
+  const tumors = [[0, 2.55, 0, 2.05], [0.18, 3.15, -0.12, 1.6], [-0.14, 3.6, 0.14, 1.25]];
+  tumors.forEach(([ox, oy, oz, d], i) =>
+    place(st.tumorTpl.createInstance("tumor"), ox, oy, oz, d,
+      i === 1 ? INFECT_TUMOR_B : INFECT_TUMOR_A, true));
+  // Мешки спор на нижних ветках — фиолетовый контраст зелени.
+  [[-0.5, 1.95, 0.22, 0.5], [0.52, 2.25, -0.18, 0.42]].forEach(([ox, oy, oz, d]) =>
+    place(st.boilTpl.createInstance("boil"), ox, oy, oz, d, INFECT_BOIL, true));
+  return nodes;
+}
+
+function makeBushInst(st, ch, x, y, z, s, infected = false) {
+  const nodes = [];
+  const tpl = infected ? st.tumorTpl : st.leafTpls[Math.abs(Math.round(x * 5 + z * 2)) % 3];
+  [[0, 0.4, 0, 0.8], [0.3, 0.3, 0.2, 0.6], [-0.3, 0.3, -0.15, 0.5]].forEach(([ox, oy, oz, d], i) => {
+    const b = tpl.createInstance(infected ? "bushInf" : "bush");
+    b.instancedBuffers.color = (infected
+      ? (i === 1 ? INFECT_TUMOR_B : INFECT_TUMOR_A) : NORMAL_INST).clone();
     b.position.set(x + ox * s, y + oy * s, z + oz * s);
     b.scaling.setAll(d * s);
     b.isPickable = false;
-    b.freezeWorldMatrix();
-    ch.nodes.push(b);
+    b.metadata = { kind: "bush" };
+    if (infected) addAnimated(st, b, d * s, (x * 0.41 + z * 0.23) % 6.28, x, z);
+    else b.freezeWorldMatrix();
+    ch.nodes.push(b); nodes.push(b);
   });
+  if (infected) {
+    // Один крупный нарыв сверху — куст тоже читается как заражённый.
+    const boil = st.boilTpl.createInstance("bushBoil");
+    boil.instancedBuffers.color = INFECT_BOIL.clone();
+    boil.position.set(x + 0.12 * s, y + 0.78 * s, z - 0.08 * s);
+    boil.scaling.setAll(0.46 * s);
+    boil.isPickable = false;
+    boil.metadata = { kind: "bush" };
+    addAnimated(st, boil, 0.46 * s, (x * 0.41 + z * 0.23) % 6.28, x, z);
+    ch.nodes.push(boil); nodes.push(boil);
+  }
+  return nodes;
+}
+
+// Раз в кадр: пульс подсветки (две строки), покачивание ближайших наростов и
+// время для шейдера импостеров. Дальше 35м анимация не нужна — там cardio
+// не видно, а перебирать тысячи инстансов каждый кадр незачем.
+export function updateInfected(st, time, pos) {
+  if (!st) return;
+  st.treeMat?.setFloat?.("uTime", time);
+  st.bushMat?.setFloat?.("uTime", time);
+  st.infTreeMat?.setFloat?.("uTime", time);
+  st.infBushMat?.setFloat?.("uTime", time);
+  const p = 0.75 + 0.25 * Math.sin(time * 2.9);
+  st.infLeafMat?.emissiveColor.set(0.18 * p, 0.42 * p, 0.03 * p);
+  const b = 0.55 + 0.45 * Math.sin(time * 2.1 + 1.3);
+  st.infBoilMat?.emissiveColor.set(0.32 * b, 0.08 * b, 0.42 * b);
+  const px = pos?.x ?? 0, pz = pos?.z ?? 0;
+  for (const a of st.animated) {
+    const dx = a.x - px, dz = a.z - pz;
+    if (dx * dx + dz * dz > 35 * 35) continue;
+    const k = 1 + 0.09 * Math.sin(time * 2.4 + a.phase);
+    a.node.scaling.setAll(a.base * k);
+    a.node.rotation.y = a.phase * 0.4 + Math.sin(time * 1.2 + a.phase) * 0.14;
+  }
 }

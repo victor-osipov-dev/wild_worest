@@ -2,6 +2,7 @@
 import * as BABYLON from "@babylonjs/core";
 import { getHeight, HOUSE_POS, PIT_CENTER } from "./noise.js";
 import { asset } from "./assets.js";
+import { t } from "./i18n.js";
 
 export const HOUSE = { x: HOUSE_POS.x, z: HOUSE_POS.z };
 
@@ -38,6 +39,10 @@ export function buildHouse(scene) {
     if (opt.collide) m.checkCollisions = true;
     if (opt.pick === false) m.isPickable = false;
     if (opt.meta) m.metadata = opt.meta;
+    if (opt.burn) {
+      m.material = m.material === darkWoodMat ? burnDarkMat : burnWoodMat;
+      woodParts.push(m);
+    }
     return m;
   };
   const floor = BABYLON.MeshBuilder.CreateBox("floor", { width: 5.2, height: 0.2, depth: 4.8 }, scene);
@@ -45,10 +50,18 @@ export function buildHouse(scene) {
   floor.checkCollisions = true; floor.isPickable = true; floor.metadata = { kind: "house" };
 
   const wallMat = woodMat;
+  // Все деревянные элементы горят своими клонами материалов: пол (и только он)
+  // остаётся обычным, чтобы под ним не появлялся огонь.
+  const burnWallMat = wallMat.clone("burnWallMat");
+  const burnWoodMat = woodMat.clone("burnWoodMat");
+  const burnDarkMat = darkWoodMat.clone("burnDarkMat");
+  const wallParts = [], woodParts = [];
   const mkWall = (w, h, d, x, y, z) => {
     const m = BABYLON.MeshBuilder.CreateBox("wall", { width: w, height: h, depth: d }, scene);
-    m.position.set(x, y, z); m.material = wallMat; m.parent = root;
+    const isFloorSlab = w > 3 && h < 0.3 && d > 3; // верхняя плита пола
+    m.position.set(x, y, z); m.material = isFloorSlab ? wallMat : burnWallMat; m.parent = root;
     m.checkCollisions = true; m.isPickable = true; m.metadata = { kind: "house" };
+    if (!isFloorSlab) wallParts.push(m);
     return m;
   };
   // Как в main.tscn: пол, задняя/правая стены целиком; спереди — проём двери
@@ -80,10 +93,12 @@ export function buildHouse(scene) {
   roofFront.material = roofMat; roofFront.parent = root;
   const ridge = BABYLON.MeshBuilder.CreateBox("ridge", { width: 5.6, height: 0.22, depth: 0.22 }, scene);
   ridge.position.set(0, 4.0, 0); ridge.material = roofMat; ridge.parent = root;
+  const roofParts = [roofBack, roofFront, ridge];
+  for (const p of roofParts) p.metadata = { kind: "house" }; // стрела должна их находить
   // Торцы-фронтоны как GableLeft/Right: треугольник z ±2.4, основание y 2.2, конёк y 4.0.
   // Без ExtrudePolygon (ему нужен внешний earcut): призма вручную из треугольников,
   // материал двусторонний — порядок обхода не критичен.
-  const gableMat = wallMat.clone("gableMat");
+  const gableMat = burnWallMat.clone("gableMat");
   gableMat.backFaceCulling = false;
   const mkGable = (xCenter) => {
     const t = 0.08;
@@ -109,6 +124,7 @@ export function buildHouse(scene) {
     vd.applyToMesh(m);
     m.material = gableMat; m.parent = root;
     m.checkCollisions = true; m.isPickable = true; m.metadata = { kind: "house" };
+    wallParts.push(m); // фронтон — часть стены, тоже сгорает
   };
   mkGable(2.4); mkGable(-2.4);
 
@@ -121,7 +137,9 @@ export function buildHouse(scene) {
   const doorMat = new BABYLON.StandardMaterial("doorMat", scene);
   doorMat.diffuseColor = new BABYLON.Color3(0.4, 0.25, 0.12);
   doorMat.specularColor = new BABYLON.Color3(0, 0, 0);
-  doorMesh.material = doorMat; doorMesh.checkCollisions = true;
+  const burnDoorMat = doorMat.clone("burnDoorMat");
+  doorMesh.material = burnDoorMat; doorMesh.checkCollisions = true;
+  woodParts.push(doorMesh);
   const knob = BABYLON.MeshBuilder.CreateSphere("knob", { diameter: 0.08 }, scene);
   // Локальные координаты двери: полотно 0.9 → x ±0.45, петли со стороны pivot (+0.45),
   // значит ручка у свободного края: x = -0.37 (раньше -0.75 торчала ВНЕ полотна).
@@ -134,8 +152,9 @@ export function buildHouse(scene) {
   trimMat.specularColor = new BABYLON.Color3(0, 0, 0);
   for (const z of [0.038, -0.038]) { // накладки-панели на обеих сторонах полотна
     const inset = BABYLON.MeshBuilder.CreateBox("doorInset", { width: 0.62, height: 1.5, depth: 0.016 }, scene);
-    inset.position.set(0, 0, z); inset.material = trimMat; inset.parent = doorMesh;
+    inset.position.set(0, 0, z); inset.material = burnDoorMat; inset.parent = doorMesh;
     inset.isPickable = false;
+    woodParts.push(inset);
   }
   const door = { pivot, open: false, target: 0, OPEN: -100 * Math.PI / 180, SPEED: 2.2,
     hintPos: new BABYLON.Vector3(HOUSE.x + 0.45, 2.4, HOUSE.z - 2.17) };
@@ -154,6 +173,7 @@ export function buildHouse(scene) {
   const glass = { mesh: glassMesh, broken: false };
 
   // --- Стол у ПРАВОЙ стены (как кровать): глубина вдоль X к стене, длина вдоль Z ---
+  // Стол с монитором НЕ горит — на нём стоит экран, он нужен до конца.
   mkBox("tableTop", 0.95, 0.08, 1.4, 1.875, 0.75, -0.6, woodMat, { collide: true });
   for (const dx of [-0.4, 0.4])
     for (const dz of [-0.63, 0.63])
@@ -177,11 +197,11 @@ export function buildHouse(scene) {
   screen.layerMask = 0x2; // не рендерится в собственный фид (без рекурсии)
 
   // --- Кровать: каркас, матрас, одеяло, подушка, изголовье у правой стены ---
-  mkBox("bedFrame", 2.0, 0.3, 1.0, 1.2, 0.15, 1.4, darkWoodMat, { collide: true });
+  mkBox("bedFrame", 2.0, 0.3, 1.0, 1.2, 0.15, 1.4, darkWoodMat, { collide: true, burn: true });
   mkBox("mattress", 1.9, 0.16, 0.9, 1.2, 0.38, 1.4, fabricMat);
   mkBox("blanket", 1.25, 0.07, 0.92, 0.95, 0.49, 1.4, blanketMat); // на кровати, не свисает в ноги
   mkBox("pillow", 0.45, 0.12, 0.62, 1.92, 0.52, 1.4, pillowMat);
-  mkBox("headboard", 0.08, 0.75, 1.0, 2.27, 0.375, 1.4, darkWoodMat, { collide: true });
+  mkBox("headboard", 0.08, 0.75, 1.0, 2.27, 0.375, 1.4, darkWoodMat, { collide: true, burn: true });
   const lamp = new BABYLON.PointLight("InteriorLight", new BABYLON.Vector3(HOUSE.x, 2.0, HOUSE.z), scene);
   lamp.diffuse = new BABYLON.Color3(1, 0.85, 0.6); lamp.intensity = 2.5; lamp.range = 7;
   lamp.specular = new BABYLON.Color3(0, 0, 0); // чисто диффузный свет в доме — бликов нет
@@ -192,7 +212,9 @@ export function buildHouse(scene) {
   const hemi = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0, 1, 0), scene);
   hemi.intensity = 0.55;
 
-  return { root, door, glass, screen, screenMat, lamp };
+  return { root, door, glass, screen, screenMat, lamp,
+    roof: roofParts, roofMat, walls: wallParts, wallMats: [burnWallMat, gableMat],
+    wood: woodParts, woodMats: [burnWoodMat, burnDarkMat, burnDoorMat] };
 }
 
 export function updateDoor(door, playerPos, dt) {
@@ -421,25 +443,25 @@ export function updateCampfire(cf, dt) {
 // ЛКМ по костру: сырое мясо -> жарка -> готово -> съесть (здоровье полностью)
 export function campfireInteract(cf, player, hud, toast) {
   if (cf.phase === "cooking") {
-    toast(`Мясо жарится… ${Math.max(0, Math.ceil(COOK_TIME - cf.t))}с`);
+    toast(t("Мясо жарится… {n}с", { n: Math.max(0, Math.ceil(COOK_TIME - cf.t)) }));
     return;
   }
   if (cf.phase === "ready") {
-    if (player.st.hp >= 100) { toast("Здоровье и так полное"); return; }
+    if (player.st.hp >= 100) { toast(t("Здоровье и так полное")); return; }
     cf.phase = "idle"; cf.t = 0; cf.meat.setEnabled(false);
     player.st.hp = 100;
     player.st.meatEaten = (player.st.meatEaten || 0) + 1;
     hud();
-    toast("Жареное мясо съедено — здоровье восстановлено");
+    toast(t("Жареное мясо съедено — здоровье восстановлено"));
     return;
   }
-  if (player.st.meat <= 0) { toast("Нет сырого мяса — охоться на кролика"); return; }
+  if (player.st.meat <= 0) { toast(t("Нет сырого мяса — охоться на кролика")); return; }
   player.st.meat--;
   hud();
   cf.phase = "cooking"; cf.t = 0;
   cf.meat.setEnabled(true);
   cf.meat.material.diffuseColor = RAW_COLOR.clone();
-  toast("Мясо заряжено на жарку");
+  toast(t("Мясо заряжено на жарку"));
 }
 
 // --- Яма: торы-кольца, шипы, свечение, частицы (порт pit_visual.gd) ---

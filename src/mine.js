@@ -3,6 +3,7 @@
 // вагонетка тормозит перед воротами. Попадание стрелой открывает ворота.
 import * as BABYLON from "@babylonjs/core";
 import { arrows } from "./entities.js";
+import { t, onLangChange } from "./i18n.js";
 
 const FLOOR_Y = -60;
 const START_Z = 42;
@@ -253,6 +254,7 @@ export function createMine({ scene, camera, player, toast, onFinish }) {
     if (camCountEl) camCountEl.style.display = on ? "none" : "block";
   }
   let lastStatus = "";
+  onLangChange(() => { lastStatus = ""; });
 
   const state = {
     active: false, finished: false, z: START_Z, speed: 0,
@@ -288,7 +290,7 @@ export function createMine({ scene, camera, player, toast, onFinish }) {
     camera.position.set(0, FLOOR_Y + 1.55, START_Z + 0.15);
     camera.rotation.set(0, 0, 0);
     lastStatus = "";
-    if (toast) toast("Вагонетка покатилась! Стреляйте по красным меткам на воротах");
+    if (toast) toast(t("Вагонетка покатилась! Стреляйте по красным меткам на воротах"));
   }
 
   function finish() {
@@ -307,7 +309,7 @@ export function createMine({ scene, camera, player, toast, onFinish }) {
     g.open = true; g.openK = 0;
     g.targetMat.diffuseColor.set(0.1, 0.45, 0.12);
     g.targetMat.emissiveColor.set(0.2, 1, 0.3);
-    if (toast) toast("Метка прострелена — ворота открываются");
+    if (toast) toast(t("Метка прострелена — ворота открываются"));
   }
 
   function nextClosedGate() {
@@ -373,13 +375,15 @@ export function createMine({ scene, camera, player, toast, onFinish }) {
     state.hint = "";
     if (next) {
       const dist = next.z - state.z;
-      if (state.speed < 0.3) state.hint = "Ворота закрыты! Прострелите красную метку";
-      else if (dist < 42) state.hint = "Впереди ворота — стреляйте по красной метке";
+      if (state.speed < 0.3) state.hint = t("Ворота закрыты! Прострелите красную метку");
+      else if (dist < 42) state.hint = t("Впереди ворота — стреляйте по красной метке");
     }
     const opened = gates.filter((g) => g.open).length;
     const status = next
-      ? `Ворота ${next.index + 1} из ${gates.length} · ${Math.max(0, Math.round(next.z - state.z))} м`
-      : `Ворота ${opened} из ${gates.length} · до выхода ${Math.max(0, Math.round(FINISH_Z - state.z))} м`;
+      ? t("Ворота {n} из {m} · {d} м",
+          { n: next.index + 1, m: gates.length, d: Math.max(0, Math.round(next.z - state.z)) })
+      : t("Ворота {n} из {m} · до выхода {d} м",
+          { n: opened, m: gates.length, d: Math.max(0, Math.round(FINISH_Z - state.z)) });
     if (status !== lastStatus) {
       lastStatus = status;
       if (statusEl) statusEl.textContent = status;
