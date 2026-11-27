@@ -3,12 +3,12 @@
 import * as BABYLON from "@babylonjs/core";
 import "@babylonjs/loaders";
 import { initTerrain, updateTerrain, cullTerrainChunks, pushOutOfTrees, updateInfected, CHUNK_WORLD } from "./terrain.js";
-import { buildHouse, updateDoor, buildPit, buildCave, breakGlass,
+import { buildHouse, updateDoor, buildPit, breakGlass,
   buildCampfire, updateCampfire, campfireInteract, COOK_TIME, HOUSE } from "./world.js";
 import { createPlayer, updatePlayer, damagePlayer, createBow, updateBow, shootArrow,
   updateArrows, arrows, spawnMeat, updateMeats, spawnAnimal, updateAnimals, animals,
   pickKind, createCamManager, registerCamera, removeCamera, meats, damageAnimal,
-  updateResins, resins, getFireTexture, burstAt } from "./entities.js";
+  updateResins, resins, getFireTexture, burstAt, sparksAt } from "./entities.js";
 import { getHeight } from "./noise.js";
 import { createTestScenes } from "./testScenes.js";
 import { createStory } from "./story.js";
@@ -44,7 +44,6 @@ const terrain = initTerrain(scene);
 const { door, glass, screen, screenMat, lamp, roof, roofMat,
   walls, wallMats, wood, woodMats } = buildHouse(scene);
 const pit = buildPit(scene);
-const cave = buildCave(scene);
 const campfire = buildCampfire(scene);
 const player = createPlayer(scene, camera);
 // Огонь на игроке: включается, когда он заходит в костёр, и гаснет через
@@ -72,6 +71,9 @@ mgr.screenMode = "off"; // off | ready (светится) | on (фид в реж
 // RT-монитор: отдельная камера + текстура на экране
 const feedRT = new BABYLON.RenderTargetTexture("feedRT", { width: 480, height: 270 }, scene);
 feedRT.refreshRate = 2; // фид только в режиме монитора, каждые 2 кадра
+// У RTT clearColor по умолчанию undefined (берётся scene.clearColor) —
+// создаём свой, иначе setFeedSky падает на .set().
+feedRT.clearColor = new BABYLON.Color4(0.16, 0.18, 0.24, 1);
 const feedCam = new BABYLON.UniversalCamera("FeedCam", new BABYLON.Vector3(0, 24, 0), scene);
 feedCam.setTarget(BABYLON.Vector3.Zero());
 feedCam.fov = 110 * Math.PI / 180;
@@ -156,7 +158,7 @@ mgr.feedRT = feedRT; mgr.feedCam = feedCam;
 
 const input = { f: false, b: false, l: false, r: false, jump: false };
 const keys = {};
-let paused = false, started = false, inCave = false;
+let paused = false, started = false;
 let wildT = 5, forestT = 2, fadeT = -1, falling = false;
 
 const $ = (id) => document.getElementById(id);
@@ -344,6 +346,37 @@ function stepCam(d) {
   if (!mgr.list.length) { mgr.active = -1; return; }
   mgr.active = (((mgr.active + d) % mgr.list.length) + mgr.list.length) % mgr.list.length;
   mgr.yaw = 0; mgr.pitch = 0;
+}
+// Любая камера (своя или сюжетная) в заражённой зоне искрит и через ~10 с
+// ломается и исчезает. Камера не двигается и не уменьшается. Отдельно живёт
+// только «обречённая» сюжетная камера (storyDoomed): её растворение и остатки
+// ведёт story.js.
+const CAM_DISSOLVE = 10;
+function updateCameraDamage(dt) {
+  const outsideAt = story?.zoneOutside;
+  for (let i = mgr.list.length - 1; i >= 0; i--) {
+    const c = mgr.list[i];
+    if (!c || c.isDisposed() || c.metadata?.storyDoomed) continue;
+    const outside = outsideAt ? outsideAt(c.position.x, c.position.z) : false;
+    c.__camT = Math.max(0, Math.min(CAM_DISSOLVE,
+      (c.__camT || 0) + (outside ? dt : -dt * 1.5)));
+    const k = c.__camT / CAM_DISSOLVE;
+    if (outside && k > 0.05) {
+      c.__sparkT = (c.__sparkT || 0) - dt;
+      if (c.__sparkT <= 0) {
+        c.__sparkT = 0.45 + Math.random() * 0.35;
+        sparksAt(scene, c.position.add(new BABYLON.Vector3(0, 0.05, 0)), 10);
+      }
+    }
+    if (k >= 1) {
+      // Сноп искр, короткий крен — и корпус окончательно выходит из строя.
+      sparksAt(scene, c.position, 46);
+      removeCamera(mgr, c);
+      c.dispose();
+      hud();
+      toast(t("Камера вышла из строя!"));
+    }
+  }
 }
 function toggleMark() {
   mgr.marked = mgr.marked === mgr.active ? -1 : mgr.active;
@@ -711,7 +744,8 @@ function togglePause(on) {
 }
 $("btnContinue").onclick = () => togglePause(false);
 $("btnRestart").onclick = () => {
-  inCave = false; falling = false; fadeT = -1;
+  if (mine) mine.stop();
+  falling = false; fadeT = -1;
   player.mesh.position.copyFrom(player.st.spawn);
   player.st.hp = 100; player.st.burnT = 0; player.st.burnTick = 0;
   burnParticles.stop(); $("burnFlash").style.opacity = "0";
@@ -730,15 +764,27 @@ $("btnStart").onclick = () => {
 $("langBtn").onclick = () => setLang(getLang() === "ru" ? "en" : "ru");
 $("pause").style.display = "none";
 
+// Мини-игра в шахте: после падения в яму игрок оказывается в вагонетке.
+// Создаётся всегда: в обычной игре её запускает сюжет, в тестовых сценах —
+// отдельная сцена «Шахта», чтобы поездку можно было проверить вручную.
+const mine = createMine({
+  scene, camera, player, toast,
+  onFinish: () => {
+    // В тестовой сцене финальный экран сюжета не нужен — просто предлагаем повтор.
+    if (testScenes) { toast(t("Шахта пройдена! R — повторить")); return; }
+    if (story) story.finishMine();
+  },
+});
+
 // ---------- изолированные сцены ручного тестирования (?scene=...) ----------
 // Без параметра testScenes === null: обычная игра не меняется.
 const testScenes = new URLSearchParams(location.search).has("scene")
   ? createTestScenes({
       scene, player, camera, campfire, door, glass, mgr,
-      hud, toast, buildCamera,
+      hud, toast, buildCamera, mine,
       autoStart: () => { started = true; $("start").style.display = "none"; },
       resetRuntime: () => {
-        inCave = false; falling = false; fadeT = -1;
+        falling = false; fadeT = -1;
         $("fade").style.opacity = "0";
         mgr.monitorActive = false; mgr.yaw = 0; mgr.pitch = 0;
         $("camLabel").style.display = "none";
@@ -758,12 +804,6 @@ const testScenes = new URLSearchParams(location.search).has("scene")
 // ---------- сюжет «Последний день в лесу» ----------
 // В тестовых сценах сюжет не включается — там изолированные механики.
 const story = testScenes ? null : createStory({ scene, camera, player, mgr, hud, toast, buildCamera, terrain, screen });
-// Мини-игра в шахте: после падения в яму игрок оказывается в вагонетке.
-// В тестовых сценах не создаётся — там остаётся старая изолированная пещера.
-const mine = testScenes ? null : createMine({
-  scene, camera, player, toast,
-  onFinish: () => { if (story) story.finishMine(); },
-});
 const initialLoads = []; // .glb стартовых зверей — ждём их до снятия экрана загрузки
 if (story) {
   // Здоровье не полное: мясо и костёр становятся необходимыми, а не декором.
@@ -817,7 +857,8 @@ engine.runRenderLoop(() => {
   }
   const activeCam = mgr.list[mgr.active];
   let feedDir = null;
-  const camBroken = !!(story && story.feedBroken && activeCam && story.feedBroken(activeCam));
+  const camBroken = !!activeCam && (activeCam.__broken
+    || !!(story && story.feedBroken && story.feedBroken(activeCam)));
   if (!activeCam || activeCam.isDisposed()) {
     // Камер нет — экран чёрный, texтура и RT не нужны.
     if (mgr.active !== -1) { mgr.active = -1; mgr.yaw = 0; mgr.pitch = 0; }
@@ -891,7 +932,9 @@ engine.runRenderLoop(() => {
     }
   }
   player.st.pitBlocked = !!(story && story.grateIntact);
-  if (!inMine) updatePlayer(scene, player, camera, input, dt, mgr.monitorActive);
+  // После финиша шахты камеру/игрока больше не двигаем: иначе персонаж
+  // проваливается в пустоту, пока показывается финальный экран.
+  if (!inMine && !mine.finished) updatePlayer(scene, player, camera, input, dt, mgr.monitorActive);
   pushOutOfTrees(terrain, player.mesh.position);
   updateDoor(door, player.mesh.position, dt);
   // _update_looking каждый кадр (луч 5м до монитора) + хинты как в _update_hud
@@ -962,8 +1005,7 @@ engine.runRenderLoop(() => {
   setLight(campfire.light, nearFire);
   setLight(pit.glow, nearPit);
   setLight(pit.glow2, nearPit);
-  setLight(cave.torch, inCave);
-  if (mine) setLight(mine.light, inMine);
+  setLight(mine.light, inMine);
   setParticles(campfire.fire, nearFire);
   setParticles(campfire.smoke, nearFire);
   setParticles(pit.motes, nearPit);
@@ -982,6 +1024,7 @@ engine.runRenderLoop(() => {
   updateResins(scene, dt, player, toast);
   updateAnimals(scene, dt, player, hud);
   if (story) story.update(dt);
+  updateCameraDamage(dt);
   updateCampfire(campfire, raw);
   updateHouseFire(dt, now / 1000);
   if (campfire.readyFlash) { campfire.readyFlash = false; toast(t("Жареное мясо готово — тыкни по костру")); }
@@ -1110,32 +1153,20 @@ engine.runRenderLoop(() => {
     } else camMark.style.display = "none";
   } else camMark.style.display = "none";
 
-  // яма: падение в триггер -> fade 0.9с -> вагонетка в шахте (или пещера в тесте)
-  if (!inCave && !inMine && !(story && story.grateIntact)) {
+  // яма: падение в триггер -> fade 0.9с -> вагонетка в шахте
+  if (!inMine && !(story && story.grateIntact)) {
     const d = Math.hypot(player.mesh.position.x - pit.trigger.x, player.mesh.position.z - pit.trigger.z);
     const dy = Math.abs(player.mesh.position.y - pit.trigger.y);
     if (!falling && d < pit.triggerR && dy < pit.triggerH / 2) { falling = true; fadeT = 0; }
-  } else if (inCave) {
-    if (player.mesh.position.subtract(cave.exitPos).length() < 1.8) {
-      inCave = false; falling = false;
-      player.mesh.position.set(2, getHeight(2, 2) + 0.6, 2);
-    }
   }
   if (fadeT >= 0) {
     fadeT += dt / 0.9;
     $("fade").style.opacity = Math.min(1, fadeT);
     if (fadeT >= 1) {
       fadeT = -1; falling = false;
-      if (mine) {
-        // Сюжетная ветка: падаем в вагонетку и катимся по шахте.
-        mine.start();
-        if (story) story.notifyCave();
-      } else {
-        inCave = true;
-        player.mesh.position.copyFrom(cave.spawnPos);
-        player.st.vel.set(0, 0, 0);
-        if (story) story.notifyCave();
-      }
+      // Падаем в вагонетку и катимся по шахте.
+      mine.start();
+      if (story) story.notifyCave();
       setTimeout(() => $("fade").style.opacity = 0, 300);
     }
   }
@@ -1182,5 +1213,5 @@ runLoading();
 // Доступ для автотестов Playwright — только с ?test=1, в обычной игре не создаётся.
 if (new URLSearchParams(location.search).has("test")) {
   window.__game = { scene, camera, player, hud, campfire, campfireInteract,
-    damagePlayer, damageAnimal, getHeight, terrain, animals, meats, arrows, mgr, testScenes, BABYLON };
+    damagePlayer, damageAnimal, getHeight, terrain, animals, meats, arrows, mgr, testScenes, mine, BABYLON };
 }

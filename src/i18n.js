@@ -68,6 +68,7 @@ const EN = {
   "АЧИВКА РАЗБЛОКИРОВАНА": "ACHIEVEMENT UNLOCKED",
   "Попал в себя!": "You hit yourself!",
   "Камера взорвалась!": "Camera exploded!",
+  "Камера вышла из строя!": "Camera destroyed!",
   "Здоровье и так полное": "Health is already full",
   "Жареное мясо съедено — здоровье восстановлено": "Cooked meat eaten — health restored",
   "Нет сырого мяса — охоться на кролика": "No raw meat — hunt a rabbit",
@@ -80,8 +81,8 @@ const EN = {
   "Грохот в лесу… зелёная стена уже близко": "A rumble in the forest… the green wall is closing in",
   "Вы проводите смолой над решёткой…": "You drip resin over the grate…",
   "Решётка провалилась — проход в яму открыт": "The grate collapsed — the pit is open",
-  "Вагонетка покатилась! Стреляйте по красным меткам на воротах":
-    "The minecart is rolling! Shoot the red targets on the gates",
+  "Вагонетка покатилась! Ищите красный механизм на воротах":
+    "The minecart is rolling! Look for the red mechanism on the gates",
   "Метка прострелена — ворота открываются": "Target hit — the gate is opening",
 
   // --- шахта ---
@@ -89,6 +90,24 @@ const EN = {
   "Впереди ворота — стреляйте по красной метке": "Gate ahead — shoot the red target",
   "Ворота {n} из {m} · {d} м": "Gate {n} of {m} · {d} m",
   "Ворота {n} из {m} · до выхода {d} м": "Gates {n} of {m} · {d} m to exit",
+  "Ворота держит чека лебёдки — прострелите красный клин":
+    "The gate is held by a winch pin — shoot the red cotter pin",
+  "Цепь заперта навесным замком — сбейте красный замок":
+    "The chain is locked with a padlock — shoot the red lock",
+  "Бочка пороха подпирает запор — подорвите её выстрелом":
+    "A powder keg braces the latch — shoot it",
+  "Ворота закрыты! {hint}": "Gate closed! {hint}",
+  "Впереди ворота — {hint}": "Gate ahead — {hint}",
+  "Клин выбит — противовес поднимает ворота":
+    "Pin knocked out — the counterweight lifts the gate",
+  "Замок сбит — цепь разматывается, ворота идут вверх":
+    "Lock shot off — the chain unwinds and the gate rises",
+  "Порох рванул — ворота сорвало с рамы":
+    "The powder blew — the gate was blown off its frame",
+  "Секреты: {n} / {m}": "Secrets: {n} / {m}",
+  "Пасхалка: золотая шестерёнка!": "Easter egg: a golden gear!",
+  "Пасхалка: канарейка на свободе!": "Easter egg: the canary is free!",
+  "Пасхалка: шахтёрская каска": "Easter egg: a miner's helmet",
 
   // --- сюжет: цели ---
   "НОВАЯ ЦЕЛЬ · {n}/{m}": "NEW OBJECTIVE · {n}/{m}",
@@ -107,8 +126,8 @@ const EN = {
   "Спуститесь под землю": "Go underground",
   "Прыгните в открывшуюся яму.": "Jump into the open pit.",
   "Пройдите шахту": "Clear the mine",
-  "Стреляйте по красным меткам на воротах, чтобы вагонетка ехала дальше.":
-    "Shoot the red targets on the gates to keep the minecart moving.",
+  "Простреливайте красные механизмы на воротах (чека, замок, порох), чтобы вагонетка ехала дальше.":
+    "Shoot the red mechanisms on the gates (pin, lock, powder) to keep the minecart moving.",
   "ШАХТА ПРОЙДЕНА": "MINE CLEARED",
   "Вы выбрались из-под земли, пока лес наверху поглощала кислота.":
     "You made it out from underground while acid consumed the forest above.",
@@ -151,8 +170,8 @@ const EN = {
     "Bring HP to zero — death and return to the scene start.",
   "После 1-го попадания зверь жив (1 HP) и стрела видна в нём; после 2-го — смерть, тело исчезает через 0.7 с, стрела падает и подбирается ЛКМ. Удар волка — 12 HP, лисы — 8. При 0 HP игрок воскресает на старте сцены со 100 HP.":
     "After the 1st hit the animal is alive (1 HP) with the arrow visible in it; after the 2nd — death, the body disappears after 0.7 s, the arrow drops and can be picked up with LMB. Wolf hit — 12 HP, fox — 8. At 0 HP the player respawns at the scene start with 100 HP.",
-  "Кролик и мясо, костёр, камеры, дом, яма/пещера. Обычное преследование зверей здесь не проверяется (speed=0).":
-    "Rabbit and meat, campfire, cameras, house, pit/cave. Normal animal chasing is not tested here (speed=0).",
+  "Кролик и мясо, костёр, камеры, дом, шахта. Обычное преследование зверей здесь не проверяется (speed=0).":
+    "Rabbit and meat, campfire, cameras, house, mine. Normal animal chasing is not tested here (speed=0).",
   "Кролик · мясо · костёр": "Rabbit · meat · campfire",
   "Проверить цикл добычи и лечения: кролик → мясо → жарка → еда.":
     "Check the hunting and healing loop: rabbit → meat → cooking → eating.",
@@ -176,8 +195,8 @@ const EN = {
     "Kill the second rabbit, take the meat and try cooking at full HP.",
   "Мясо падает рядом с кроликом и исчезает при подходе, счётчик «Мясо» растёт. Во время жарки подсказка считает секунды; после еды HP = 100 и при полном здоровье отображается «Здоровье и так полное».":
     "Meat drops next to the rabbit and disappears when approached; the «Meat» counter increases. During cooking the hint counts seconds; after eating HP = 100 and at full health «Health is already full» is shown.",
-  "Хищники и их урон, застревание стрел, камеры, дом, яма/пещера.":
-    "Predators and their damage, arrow sticking, cameras, house, pit/cave.",
+  "Хищники и их урон, застревание стрел, камеры, дом, шахта.":
+    "Predators and their damage, arrow sticking, cameras, house, mine.",
   "Камеры и монитор": "Cameras and monitor",
   "Проверить монитор, фид, переключение камер, метку и снятие камеры.":
     "Check the monitor, the feed, camera switching, the marker and camera removal.",
@@ -197,8 +216,8 @@ const EN = {
     "Leave the house, look at the camera by the door and press E — it is removed.",
   "Экран загорается картинкой с камеры; счётчик «Камеры: 2 / 5». У отмеченной камеры рядом с номером появляется «— метка». Метка переживает выход по E/Esc, стрелка указывает на неё. E по камере удаляет её и уменьшает счётчик.":
     "The screen lights up with the camera feed; the counter reads «Cameras: 2 / 5». The marked camera shows «— marked» next to its number. The marker survives exiting with E/Esc and the arrow points to it. Pressing E on a camera removes it and decreases the counter.",
-  "Постановка камеры на ствол дерева (деревья начинаются за 26 м от центра), урон/охота, костёр, яма.":
-    "Mounting a camera on a tree trunk (trees start 26 m from the centre), damage/hunting, campfire, pit.",
+  "Постановка камеры на ствол дерева (деревья начинаются за 26 м от центра), урон/охота, костёр, шахта.":
+    "Mounting a camera on a tree trunk (trees start 26 m from the centre), damage/hunting, campfire, mine.",
   "Дом: дверь и стекло": "House: door and glass",
   "Проверить открытие двери и разбивание окна стрелой.": "Check opening the door and breaking the window with an arrow.",
   "E в радиусе 4 м — открыть/закрыть дверь": "E within 4 m — open/close the door",
@@ -214,24 +233,40 @@ const EN = {
     "Press R to reset the door and glass to their initial state.",
   "Подсказка «E — открыть/закрыть дверь», створка плавно поворачивается. После попадания стекло исчезает и сыплются 16 осколков (живут 2–4 с).":
     "The hint «E — open/close the door» appears and the door rotates smoothly. After the hit the glass disappears and 16 shards fall (they live 2–4 s).",
-  "Внутренняя мебель, монитор и камеры, охота, яма/пещера.":
-    "Interior furniture, monitor and cameras, hunting, pit/cave.",
-  "Яма и пещера": "Pit and cave",
-  "Проверить падение в яму, затемнение и возврат из пещеры.":
-    "Check falling into the pit, the fade and returning from the cave.",
-  "триггер падения в воронке (центр 8,0)": "fall trigger in the crater (centre 8,0)",
-  "fade 0.9 с и телепорт в пещеру": "0.9 s fade and teleport to the cave",
-  "зелёная метка выхода и возврат на поверхность": "green exit marker and return to the surface",
-  "В 6.5 м к северу от ямы, лицом к ней. HP 100.": "6.5 m north of the pit, facing it. HP 100.",
-  "Идите вперёд (W) прямо в воронку до падения.": "Walk forward (W) straight into the crater until you fall.",
-  "Дождитесь затемнения — окажетесь в пещере.": "Wait for the fade — you end up in the cave.",
-  "Найдите зелёную метку у стены и подойдите к ней.": "Find the green marker by the wall and walk up to it.",
-  "Проверьте возврат на поверхность, затем нажмите R для повтора.":
-    "Check the return to the surface, then press R to repeat.",
-  "После падения экран плавно темнеет за ~0.9 с, игрок появляется в пещере с факелом. Подход к зелёной метке возвращает на поверхность рядом с ямой.":
-    "After falling the screen fades over ~0.9 s, the player appears in the cave with a torch. Walking to the green marker returns you to the surface near the pit.",
-  "Урон от шипов (они только визуальные), звери, дом, камеры, костёр.":
-    "Damage from spikes (they are visual only), animals, house, cameras, campfire.",
+  "Внутренняя мебель, монитор и камеры, охота, шахта.":
+    "Interior furniture, monitor and cameras, hunting, mine.",
+  "Шахта · вагонетка": "Mine · minecart",
+  "Проверить поездку в вагонетке, механизмы ворот, динамику тоннеля и пасхалки.":
+    "Check the minecart ride, the gate mechanisms, tunnel dynamics and easter eggs.",
+  "вагонетка едет сама, тормозит перед закрытыми воротами":
+    "the cart drives itself and brakes before closed gates",
+  "три механизма: чека лебёдки, замок на цепи, бочка пороха":
+    "three mechanisms: winch pin, chain lock, powder keg",
+  "противовес падает и тянет трос, створка уезжает вверх":
+    "the counterweight falls and pulls the rope, the gate slides up",
+  "пыль, падающие камни, тряска на битых путях, летучие мыши":
+    "dust, falling rocks, shaking on broken track, bats",
+  "три пасхалки: шестерёнка, канарейка, скелет шахтёра":
+    "three easter eggs: a gear, a canary, a miner skeleton",
+  "Вы уже в вагонетке в начале тоннеля. HP 100. Впереди трое ворот.":
+    "You are already in the cart at the start of the tunnel. HP 100. Three gates ahead.",
+  "Кликните по экрану — захват мыши.": "Click the screen to capture the mouse.",
+  "Подъезжая к воротам, найдите красный механизм с пульсирующим кольцом и табличкой.":
+    "As you approach a gate, find the red mechanism with a pulsing ring and a sign.",
+  "Выстрелите в него и проследите: противовес падает, трос тянется за ним, створка поднимается.":
+    "Shoot it and watch: the counterweight falls, the rope follows it, the gate rises.",
+  "На среднем участке проверьте тряску и искры на битых путях, летучих мышей.":
+    "In the middle section check the shaking and sparks on the broken track, and the bats.",
+  "Простерелите пасхалки: шестерёнку на стене, клетку с канарейкой, каску скелета.":
+    "Shoot the easter eggs: the gear on the wall, the canary cage, the skeleton's helmet.",
+  "Доедьте до зелёной арки — HUD покажет, что шахта пройдена.":
+    "Ride to the green arch — the HUD will show that the mine is cleared.",
+  "Нажмите R для повтора.": "Press R to replay.",
+  "Вагонетка останавливается перед закрытыми воротами. После попадания в механизм трос остаётся соединённым с падающим противовесом, створка уходит вверх, движение продолжается. Счётчик «Секреты» растёт до 3 / 3, у каждой пасхалки свой эффект.":
+    "The cart stops before closed gates. After the mechanism is hit the rope stays connected to the falling counterweight, the gate slides up and the ride continues. The «Secrets» counter grows to 3 / 3, and each easter egg has its own effect.",
+  "Сюжетная решётка над ямой и переход из леса в шахту (проверяются в обычной игре), звери, дом, камеры.":
+    "The story grate over the pit and the transition from the forest into the mine (tested in the normal game), animals, house, cameras.",
+  "Шахта пройдена! R — повторить": "Mine cleared! Press R to replay",
 };
 
 const CIS = new Set(["be", "kk", "uk", "uz", "ky", "tt"]);

@@ -360,6 +360,28 @@ export function burstAt(scene, pos, texture, count = 50) {
   setTimeout(() => { ps.stop(); setTimeout(() => ps.dispose(), 800); }, 200);
 }
 
+// Сноп коротких электрических искр: камера «умирает» с разрядом.
+export function sparksAt(scene, pos, count = 14) {
+  const ps = new BABYLON.ParticleSystem("sparks", count, scene);
+  ps.particleTexture = getFireTexture(scene);
+  ps.emitter = pos.clone();
+  ps.minEmitBox = new BABYLON.Vector3(-0.05, -0.05, -0.05);
+  ps.maxEmitBox = new BABYLON.Vector3(0.05, 0.05, 0.05);
+  ps.color1 = new BABYLON.Color4(1, 1, 0.85, 1);
+  ps.color2 = new BABYLON.Color4(0.35, 0.95, 1, 0.95);
+  ps.colorDead = new BABYLON.Color4(0.1, 0.3, 0.45, 0);
+  ps.minLifeTime = 0.12; ps.maxLifeTime = 0.42;
+  ps.minSize = 0.025; ps.maxSize = 0.075;
+  ps.direction1 = new BABYLON.Vector3(-3, -0.5, -3);
+  ps.direction2 = new BABYLON.Vector3(3, 3.5, 3);
+  ps.minEmitPower = 1.5; ps.maxEmitPower = 5;
+  ps.gravity = new BABYLON.Vector3(0, -7, 0);
+  ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_ADD;
+  ps.manualEmitCount = count;
+  ps.start();
+  setTimeout(() => { ps.stop(); setTimeout(() => ps.dispose(), 700); }, 140);
+}
+
 // ---------- Стрелы: урон 1, подбор после остановки, прилипание к мобам ----------
 export const arrows = [];
 export function shootArrow(scene, camera, power) {

@@ -523,30 +523,3 @@ export function buildPit(scene) {
   return { root, trigger, triggerR: 2.8, triggerH: 8, glow, glow2, motes: ps };
 }
 
-// --- Пещера 20x8x20 в стороне (y=-60), выход назад ---
-export function buildCave(scene) {
-  const CY = -60;
-  const root = new BABYLON.TransformNode("Cave", scene);
-  const mk = (w, h, d, x, y, z) => {
-    const m = BABYLON.MeshBuilder.CreateBox("cavewall", { width: w, height: h, depth: d }, scene);
-    m.position.set(x, CY + y, z); m.parent = root;
-    m.checkCollisions = true;
-    const mt = new BABYLON.StandardMaterial("caveMat", scene);
-    mt.diffuseColor = new BABYLON.Color3(0.12, 0.1, 0.12);
-    m.material = mt;
-    return m;
-  };
-  mk(20, 0.5, 20, 0, -0.25, 0);
-  mk(20, 0.5, 20, 0, 8, 0);
-  mk(20, 8, 0.5, 0, 4, -10); mk(20, 8, 0.5, 0, 4, 10);
-  mk(0.5, 8, 20, -10, 4, 0); mk(0.5, 8, 20, 10, 4, 0);
-  const torch = new BABYLON.PointLight("Torch", new BABYLON.Vector3(0, CY + 4, 0), scene);
-  torch.diffuse = new BABYLON.Color3(1, 0.6, 0.3); torch.intensity = 25; torch.range = 15;
-  const exitPos = new BABYLON.Vector3(0, CY + 1.5, -9.5);
-  const marker = BABYLON.MeshBuilder.CreateBox("exitMark", { width: 1.8, height: 2.8, depth: 0.3 }, scene);
-  marker.position = exitPos;
-  const mm = new BABYLON.StandardMaterial("exitMat", scene);
-  mm.emissiveColor = new BABYLON.Color3(0.1, 0.9, 0.3);
-  marker.material = mm;
-  return { exitPos, spawnPos: new BABYLON.Vector3(0, CY + 1.2, 7), CY, torch };
-}

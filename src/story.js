@@ -6,7 +6,7 @@ import * as BABYLON from "@babylonjs/core";
 import { getHeight, PIT_CENTER, HOUSE_POS } from "./noise.js";
 import { DangerZone } from "./dangerZone.js";
 import { refreshInfection, clearBushes } from "./terrain.js";
-import { removeCamera } from "./entities.js";
+import { removeCamera, sparksAt } from "./entities.js";
 import { t, onLangChange } from "./i18n.js";
 
 export function createStory(ctx) {
@@ -99,7 +99,11 @@ export function createStory(ctx) {
     const n = new BABYLON.Vector3(HOUSE_POS.x - tree.x, 0, HOUSE_POS.z - tree.z).normalize();
     buildCamera(pos, n);
     const root = mgr.list[mgr.list.length - 1];
-    return { root, x: tree.x, z: tree.z, baseY: root.position.y, t: 0, gone: false, doomed, lastK: -1 };
+    // Сюжетная камера: main не должен обрабатывать её повторно — растворение
+    // и искры ниже уже делают это.
+    root.metadata = { ...(root.metadata || {}), storyCam: true, storyDoomed: !!doomed };
+    return { root, x: tree.x, z: tree.z, baseY: root.position.y, t: 0, gone: false,
+      doomed, lastK: -1, sparkAt: 0.1 };
   }
 
   const cams = spots.map(s => mount(s, false));
@@ -124,9 +128,7 @@ export function createStory(ctx) {
   function applyDissolve(c, k) {
     if (Math.abs(k - c.lastK) < 0.01) return;
     c.lastK = k;
-    const s = 1 - 0.75 * k;
-    c.root.scaling.setAll(s);
-    c.root.position.y = c.baseY - 0.45 * k;
+    // Камера не двигается и не уменьшается — только светится от заразы.
     for (const part of c.root.getChildMeshes()) {
       if (part.name !== "cambody" && part.name !== "camled") continue;
       const mat = part.material;
@@ -190,6 +192,9 @@ export function createStory(ctx) {
 
   function updateCams(dt) {
     for (const c of cams) {
+      // Обычные камеры искрят и исчезают через main (общая система);
+      // здесь ведём только обречённую — у неё остатки и сюжет.
+      if (!c.doomed) continue;
       if (c.gone) continue;
       if (c.root.isDisposed()) {
         c.gone = true;
@@ -204,6 +209,11 @@ export function createStory(ctx) {
       c.t += dt;
       const k = Math.min(1, c.t / DISSOLVE_TIME);
       applyDissolve(c, k);
+      // Короткие разряды по мере разъедания корпуса — камера ломается «на глазах».
+      while (c.sparkAt <= k && c.sparkAt < 1) {
+        sparksAt(scene, c.root.position.add(new BABYLON.Vector3(0, 0.05, 0)), 10);
+        c.sparkAt += 0.4;
+      }
       if (k >= 1) {
         c.gone = true;
         lostCamera(c);
@@ -413,7 +423,7 @@ export function createStory(ctx) {
       text: "Прыгните в открывшуюся яму.",
       done: () => state.inMine },
     { title: "Пройдите шахту",
-      text: "Стреляйте по красным меткам на воротах, чтобы вагонетка ехала дальше.",
+      text: "Простреливайте красные механизмы на воротах (чека, замок, порох), чтобы вагонетка ехала дальше.",
       done: () => state.completed },
   ];
 
@@ -551,15 +561,15 @@ export function createStory(ctx) {
 
       if (state.melting) {
         state.meltT += dt;
-        const t = state.meltT;
-        const k = Math.min(1, t / 2.4);
+        const mt = state.meltT; // не «t»: имя t занято функцией перевода
+        const k = Math.min(1, mt / 2.4);
         // Машем стрелой над решёткой: наконечник ходит влево-вправо, а смола
         // льётся с него сплошным потоком.
-        const swing = Math.sin(t * 7.5);
+        const swing = Math.sin(mt * 7.5);
         heldPivot.position.x = -0.32 + swing * 0.24;
-        heldPivot.position.y = -0.16 + Math.sin(t * 9.2) * 0.09;
+        heldPivot.position.y = -0.16 + Math.sin(mt * 9.2) * 0.09;
         heldPivot.rotation.z = swing * 0.24;
-        heldPivot.rotation.y = Math.cos(t * 7.5) * 0.16;
+        heldPivot.rotation.y = Math.cos(mt * 7.5) * 0.16;
         drips.emitRate = 90 + 70 * k;
         grateMat.emissiveColor.set(0.9 * k, 0.12 * k, 0.02 * k);
         for (const b of bars) b.scaling.y = Math.max(0.01, 1 - k);
